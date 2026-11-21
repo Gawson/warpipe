@@ -49,24 +49,26 @@ class TestTrayIcons(unittest.TestCase):
             self.assertEqual(tray_icon_files("dark", "off", icons)[1], icons / "16" / "warpipe-tray-dark-off.svg")
 
     def test_all_variants_present_and_loadable(self):
+        """The monochrome set: the fallback when the green app icon SVGs are missing."""
         from PySide6.QtCore import QSize
 
         from warpipe.tray import load_tray_icon, tray_icon_files
-        for variant in ("light", "dark"):
-            for state in ("", "active", "off"):
-                files = tray_icon_files(variant, state)
-                self.assertIsNotNone(files, (variant, state))
-                self.assertIsNotNone(files[1], (variant, state))   # 16 px version
-                icon = load_tray_icon(variant, state)
-                self.assertFalse(icon.isNull())
-                sizes = icon.availableSizes()
-                self.assertIn(QSize(16, 16), sizes)
-                self.assertIn(QSize(22, 22), sizes)
+        with tempfile.TemporaryDirectory() as no_hicolor:
+            for variant in ("light", "dark"):
+                for state in ("", "active", "off"):
+                    files = tray_icon_files(variant, state)
+                    self.assertIsNotNone(files, (variant, state))
+                    self.assertIsNotNone(files[1], (variant, state))   # 16 px version
+                    icon = load_tray_icon(variant, state, hicolor=Path(no_hicolor))
+                    self.assertFalse(icon.isNull())
+                    sizes = icon.availableSizes()
+                    self.assertIn(QSize(16, 16), sizes)
+                    self.assertIn(QSize(22, 22), sizes)
 
     def test_fallback_without_files(self):
         from warpipe.tray import load_tray_icon
         with tempfile.TemporaryDirectory() as d:
-            self.assertFalse(load_tray_icon("light", "active", Path(d)).isNull())
+            self.assertFalse(load_tray_icon("light", "active", Path(d), hicolor=Path(d)).isNull())
 
     def test_variant_from_text_color(self):
         from PySide6.QtGui import QColor
@@ -83,33 +85,6 @@ class TestTrayIcons(unittest.TestCase):
         self.assertEqual(icon_state(Status(detection=found, enabled=True)), "active")
         self.assertEqual(icon_state(Status(detection=Detection(STATUS_NONE), enabled=True)), "")
         self.assertEqual(icon_state(Status(detection=None, enabled=True)), "")
-
-
-class TestMenuAnchor(unittest.TestCase):
-    """Left click opens the menu: where (pure function, no Qt needed)."""
-
-    SCREENS = [(0, 0, 1920, 1080), (1920, 0, 2560, 1440)]
-    TRAY = (1800, 1050, 24, 24)
-    AVAIL = (0, 0, 1920, 1040)
-
-    def test_cursor_used_when_usable(self):
-        from warpipe.tray import menu_anchor
-        self.assertEqual(menu_anchor((1850, 1060), self.SCREENS, self.TRAY, self.AVAIL), (1850, 1060))
-        self.assertEqual(menu_anchor((3000, 20), self.SCREENS, None, self.AVAIL), (3000, 20))   # 2nd screen
-
-    def test_wayland_cursor_falls_back_to_tray_geometry(self):
-        from warpipe.tray import menu_anchor
-        for bad in ((0, 0), (-5, 300), (5000, 5000), None):
-            self.assertEqual(menu_anchor(bad, self.SCREENS, self.TRAY, self.AVAIL), (1812, 1062), bad)
-
-    def test_then_bottom_right_of_primary_available_area(self):
-        from warpipe.tray import menu_anchor
-        for tray in (None, (0, 0, 0, 0), (10, 10, -1, 5)):
-            self.assertEqual(menu_anchor((0, 0), self.SCREENS, tray, self.AVAIL), (1919, 1039), tray)
-        self.assertEqual(menu_anchor((0, 0), self.SCREENS, None, (1920, 0, 2560, 1400)), (4479, 1399))
-        # nothing known at all (no screens): still a point, never an exception
-        self.assertEqual(menu_anchor((0, 0), [], None, None), (0, 0))
-        self.assertEqual(menu_anchor((0, 0), [], None, (0, 0, 0, 0)), (0, 0))
 
 
 @unittest.skipUnless(HAVE_QT, "PySide6 missing")
@@ -173,26 +148,6 @@ class TestTrayMenu(unittest.TestCase):
         self.assertIn("Tylko zaznaczone do Discorda", texts)
         self.assertIn("Cały system (przywróć)", texts)
         self.assertIn("Zakończ", texts)
-
-    def test_left_click_opens_the_menu(self):
-        from PySide6.QtCore import QPoint
-        from PySide6.QtWidgets import QSystemTrayIcon
-
-        from warpipe.tray import TrayController
-        self.enf.refresh()
-        ctl = TrayController(self.enf)
-        with mock.patch.object(ctl.menu, "popup") as popup, \
-                mock.patch.object(ctl.tray, "showMessage") as show, \
-                mock.patch("warpipe.tray.QCursor.pos", return_value=QPoint(0, 0)):
-            ctl._on_activated(QSystemTrayIcon.ActivationReason.Trigger)
-        popup.assert_called_once()
-        show.assert_not_called()                     # no status notification any more
-        pt = popup.call_args[0][0]
-        # (0, 0) cursor on Wayland -> fallback: the tray icon or the primary screen's corner
-        self.assertNotEqual((pt.x(), pt.y()), (0, 0))
-        with mock.patch.object(ctl.menu, "popup") as popup:
-            ctl._on_activated(QSystemTrayIcon.ActivationReason.Context)   # right click: the platform
-        popup.assert_not_called()
 
     def test_empty_selection_warns(self):
         """Enforcing with nothing ticked keeps its meaning (no audio) but is never silent."""

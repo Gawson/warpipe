@@ -10,7 +10,9 @@ Modules:
   control  — control channel of the running instance (Unix socket, JSON lines)
   i18n     — tiny translation helper (English UI, optional Polish)
   cli      — command-line interface
-  tray     — system tray icon (PySide6)
+  tray     — system tray icon (PySide6): left click = window, right click = menu
+  popup    — the window (status, per-app switches), model + widgets
+  icons    — the green pipe icon, its fallbacks, app icons for the window
 """
 
 __version__ = "0.1.0"

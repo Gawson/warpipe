@@ -355,6 +355,32 @@ PL: dict[str, str] = {
     "Quit": "Zakończ",
     "Warpipe is already running — its icon is in the system tray (next to the clock).":
         "Warpipe już działa — jego ikona jest w zasobniku (obok zegara).",
+    "Language": "Język",
+    "Automatic (system)": "Automatycznie (jak system)",
+    "Start at login": "Uruchamiaj po zalogowaniu",
+    "Available after installing Warpipe (install.sh)": "Dostępne po instalacji Warpipe (install.sh)",
+    "Can't change start at login: {error}": "Nie mogę zmienić uruchamiania po zalogowaniu: {error}",
+
+    # ---- window (left click on the tray icon)
+    "Discord Go Live: audio active": "Go Live z dźwiękiem",
+    "No Go Live audio": "Brak dźwięku Go Live",
+    "Capture ambiguous": "Niepewny strumień",
+    "Invalid stream choice": "Zły wybór strumienia",
+    "No app selected — stream has no audio": "Nic nie zaznaczono — stream jest bez dźwięku",
+    "Several Discord streams could be Go Live — pick one in the menu (bottom right)":
+        "Kilka strumieni Discorda może być Go Live — wybierz właściwy w menu (prawy dolny róg)",
+    "on stream": "na streamie",
+    "selected · waiting for Go Live": "zaznaczona · czeka na Go Live",
+    "selected · not on stream yet": "zaznaczona · jeszcze nie na streamie",
+    "Discord can't capture this — Warpipe adds it": "Discord jej nie przechwyci — Warpipe ją doda",
+    "playing, not on stream": "gra, ale nie na streamie",
+    "not playing · remembered": "nie gra · zapamiętana",
+    "What the stream hears": "Co słychać na streamie",
+    "No app is playing right now": "Żadna aplikacja teraz nie gra",
+    "Whole system": "Cały system",
+    "Back to Discord's default: all system audio goes to the stream":
+        "Jak domyślnie w Discordzie: cały dźwięk systemu idzie na stream",
+    "Menu": "Menu",
 }
 
 # plural msgid -> (1, 2-4, 5+) forms

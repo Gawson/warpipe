@@ -37,6 +37,8 @@ while IFS= read -r f; do
   rm -rf -- "$f"
 done < "$MANIFEST"
 rm -f -- "$MANIFEST"
+# "Start at login" switched on from the window's menu (not in the manifest)
+rm -f -- "$CONF/autostart/io.github.gawson.Warpipe.desktop"
 rmdir "$APPDIR" 2>/dev/null || true
 
 command -v gtk-update-icon-cache >/dev/null && gtk-update-icon-cache -q -t -f "$DATA/icons/hicolor" 2>/dev/null || true

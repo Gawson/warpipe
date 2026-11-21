@@ -684,6 +684,17 @@ class Enforcer:
         st = self.set_app_selected(key, False)
         return st, _("Removed {app}.").format(app=key) + " " + self._routing_text()
 
+    def set_language(self, value: str) -> None:
+        """Save the UI language setting ("auto", "en" or "pl"); see i18n."""
+        with self._lock:
+            self.config.language = value
+            if not self.persist:
+                return
+            try:
+                self.config.save()
+            except (OSError, ValueError) as e:
+                self._emit("error", _("Can't save settings: {error}").format(error=e))
+
     def set_capture_override(self, serials: list[int] | None, remember: bool = True) -> Status:
         """Manual choice of the Discord stream (menu / --capture).
 

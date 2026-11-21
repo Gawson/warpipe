@@ -1,6 +1,11 @@
 """System tray icon (PySide6, QSystemTrayIcon — on Plasma Wayland via SNI).
 
-Menu:
+Left click: the Warpipe window (popup.PopupWindow) — shown, or hidden again by the
+next left click. Not a menu: on Wayland a menu popped up from a tray click has no
+parent surface and is never shown, and Qt always exports ItemIsMenu=false, so
+Plasma does not open the menu on a left click itself.
+
+Right click: the menu (exported over DBusMenu, shown by the panel):
   Discord Go Live audio: active / not detected   (info)
   To Discord only: …                             (info)
   [x] Only selected apps
@@ -11,18 +16,16 @@ Menu:
   (Which Discord stream? — only when detection is ambiguous)
       Quit
 
-Left click opens the same menu as right click (its first line is the status);
-see menu_anchor() for where it opens.
+The window's menu button: Which Discord stream? (when needed), Language, Start at
+login, Quit.
 
 Graph watching runs in a separate thread (Watcher); the state reaches the GUI
-through a Qt signal (queued connection between threads).
+through a Qt signal (queued connection between threads) and updates the menu and
+the open window there.
 
-Icon: data/icons/tray/warpipe-tray-{light,dark}[-active|-off].svg (installed as
-<appdir>/icons/tray). "light" = dark glyph for light panels, "dark" = light glyph
-for dark panels, chosen from the palette's text color. "-active" while enforcing
-with a capture present, "-off" when enforcement is disabled ("Whole system").
-Without those files: the theme icon io.github.gawson.Warpipe-symbolic, then a
-generic audio icon.
+Icon: the green pipe (see icons.py) — faded waves while waiting for Go Live,
+full waves while enforcing with a capture present, grey when enforcement is off
+("Whole system"); falls back to the monochrome tray SVGs, then theme icons.
 """
 
 from __future__ import annotations
@@ -32,141 +35,28 @@ import signal
 import sys
 import threading
 import time
-from pathlib import Path
 
-from PySide6.QtCore import QObject, QPoint, QSize, QTimer, Signal
-from PySide6.QtGui import (QAction, QColor, QCursor, QGuiApplication, QIcon,
-                           QImageReader, QPalette, QPixmap)
-from PySide6.QtWidgets import (QApplication, QMenu, QMessageBox, QStyle,
-                               QSystemTrayIcon)
+from PySide6.QtCore import QObject, QTimer, Signal
+from PySide6.QtGui import QAction, QActionGroup, QCursor, QGuiApplication, QIcon
+from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon
 
-from . import APP_ID, APP_NAME, DESKTOP_ID
+from . import APP_ID, APP_NAME, DESKTOP_ID, i18n
 from .control import start_control_server
 from .enforcer import Enforcer, InvalidAppName, Status, Watcher
 from .i18n import _, ngettext
+from .icons import (desktop_index, icon_state, load_tray_icon, palette_variant,
+                    tray_icon_files, tray_icons_dir, variant_for_text_color)  # noqa: F401 (re-exported)
 from .planner import KIND_MIC, STATUS_AMBIGUOUS
-from .state import Config, InstanceLock, SnapshotStore
+from .popup import PopupWindow, place_near, popup_model
+from .state import (Config, InstanceLock, SnapshotStore, autostart_available,
+                    autostart_enabled, set_autostart)
 
 log = logging.getLogger("warpipe")
 
-ICON_STATE_NORMAL = ""
-ICON_STATE_ACTIVE = "active"
-ICON_STATE_OFF = "off"
-ICON_SIZES = (16, 22, 24, 32, 48, 64)
-THEME_ICON = DESKTOP_ID + "-symbolic"
+LANGUAGE_CHOICES = (("auto", None), ("en", "English"), ("pl", "Polski"))   # names never translated
 
 
-# ------------------------------------------------------------------ icons
-def tray_icons_dir(pkg_dir: Path | str | None = None) -> Path | None:
-    """Directory with the tray SVGs, resolved relative to the package:
-    <repo>/data/icons/tray in a checkout, <appdir>/icons/tray when installed."""
-    pkg = Path(pkg_dir) if pkg_dir is not None else Path(__file__).resolve().parent
-    base = pkg.parent
-    for d in (base / "data" / "icons" / "tray", base / "icons" / "tray"):
-        if d.is_dir():
-            return d
-    return None
-
-
-def tray_icon_name(variant: str, state: str = ICON_STATE_NORMAL) -> str:
-    return f"warpipe-tray-{variant}" + (f"-{state}" if state else "") + ".svg"
-
-
-def tray_icon_files(variant: str, state: str = ICON_STATE_NORMAL,
-                    icons_dir: Path | None = None) -> tuple[Path, Path | None] | None:
-    """(main SVG, 16 px SVG or None) for a variant/state, or None if missing."""
-    d = icons_dir if icons_dir is not None else tray_icons_dir()
-    if d is None:
-        return None
-    name = tray_icon_name(variant, state)
-    main = d / name
-    if not main.is_file():
-        return None
-    small = d / "16" / name
-    return main, (small if small.is_file() else None)
-
-
-def variant_for_text_color(color: QColor) -> str:
-    """Light text = dark panel → the "dark" set (light glyph), and vice versa."""
-    return "dark" if color.lightnessF() > 0.5 else "light"
-
-
-def palette_variant(app: QGuiApplication | None = None) -> str:
-    app = app or QGuiApplication.instance()
-    if app is None:
-        return "light"
-    return variant_for_text_color(app.palette().color(QPalette.ColorRole.WindowText))
-
-
-def icon_state(st: Status) -> str:
-    if not st.enabled:
-        return ICON_STATE_OFF
-    if st.detection is not None and st.detection.found:
-        return ICON_STATE_ACTIVE
-    return ICON_STATE_NORMAL
-
-
-def _svg_icon(main: Path, small: Path | None) -> QIcon:
-    icon = QIcon()
-    for size in ICON_SIZES:
-        src = small if (small is not None and size <= 16) else main
-        reader = QImageReader(str(src))
-        reader.setScaledSize(QSize(size, size))
-        img = reader.read()
-        if not img.isNull():
-            icon.addPixmap(QPixmap.fromImage(img))
-    return icon
-
-
-def _theme_icon(names: list[str], fallback: QStyle.StandardPixmap) -> QIcon:
-    for n in names:
-        icon = QIcon.fromTheme(n)
-        if not icon.isNull():
-            return icon
-    app = QApplication.instance()
-    return app.style().standardIcon(fallback) if app else QIcon()
-
-
-def load_tray_icon(variant: str, state: str, icons_dir: Path | None = None) -> QIcon:
-    files = tray_icon_files(variant, state, icons_dir)
-    if files is not None:
-        icon = _svg_icon(*files)
-        if not icon.isNull():
-            return icon
-        log.warning("could not load the tray icon %s — using the theme icon", files[0])
-    names = ([f"{DESKTOP_ID}-{state}-symbolic"] if state else []) + [THEME_ICON, "audio-volume-high", "audio-card"]
-    return _theme_icon(names, QStyle.StandardPixmap.SP_MediaVolume)
-
-
-Rect = tuple[int, int, int, int]   # x, y, width, height
-
-
-def _inside(p: tuple[int, int], r: Rect) -> bool:
-    x, y, w, h = r
-    return w > 0 and h > 0 and x <= p[0] < x + w and y <= p[1] < y + h
-
-
-def menu_anchor(cursor: tuple[int, int] | None, screens: list[Rect], tray: Rect | None,
-                primary_available: Rect | None) -> tuple[int, int]:
-    """Where the menu opens on a left click (QMenu.popup then keeps it on screen).
-
-    1. the mouse cursor — unless it is unusable: on Wayland QCursor.pos() is often
-       (0, 0) or a stale point outside every screen;
-    2. the centre of the tray icon, if Qt knows its geometry (often not on Wayland);
-    3. the bottom-right corner of the primary screen's available area (where the
-       system tray usually is).
-    """
-    if cursor is not None and tuple(cursor) != (0, 0) and any(_inside(cursor, s) for s in screens):
-        return int(cursor[0]), int(cursor[1])
-    if tray is not None and tray[2] > 0 and tray[3] > 0:
-        return tray[0] + tray[2] // 2, tray[1] + tray[3] // 2
-    if primary_available is not None and primary_available[2] > 0 and primary_available[3] > 0:
-        x, y, w, h = primary_available
-        return x + w - 1, y + h - 1
-    return 0, 0
-
-
-def _rect(r) -> Rect | None:
+def _rect(r) -> tuple[int, int, int, int] | None:
     return (r.x(), r.y(), r.width(), r.height()) if r is not None and r.isValid() else None
 
 
@@ -213,7 +103,19 @@ class TrayController(QObject):
         self.act_enforce: QAction | None = None
         self.act_restore: QAction | None = None
         self.act_quit: QAction | None = None
+        self.act_autostart: QAction | None = None
+        self.language_actions: dict[str, QAction] = {}
         self.build_menu(enforcer.status)
+
+        self.popup = PopupWindow()
+        self.popup.enforce_toggled.connect(self._on_toggle_enforce)
+        self.popup.app_toggled.connect(self._on_app)
+        self.popup.whole_system_clicked.connect(self._on_restore)
+        self.settings_menu = QMenu(self.popup)
+        self.settings_menu.setToolTipsVisible(True)
+        self.settings_menu.aboutToShow.connect(self.build_settings_menu)
+        self.popup.menu_button.setMenu(self.settings_menu)
+        self.build_settings_menu()
 
     # -------------------------------------------------------------- icon
     def icon_for(self, st: Status) -> QIcon:
@@ -291,27 +193,60 @@ class TrayController(QObject):
             none = m.addAction(_("(no app is playing right now)"))
             none.setEnabled(False)
 
-        det = st.detection
-        if det is not None and (det.status == STATUS_AMBIGUOUS or self.enforcer.override):
-            sub = m.addMenu(_("Which Discord stream?"))
-            auto = sub.addAction(_("Automatic"))
-            auto.setCheckable(True)
-            auto.setChecked(not self.enforcer.override)
-            auto.triggered.connect(lambda _checked=False: self._on_pick_capture(None))
-            for c in det.candidates:
-                if c.kind == KIND_MIC:
-                    continue
-                warn = (" (" + _("check that it isn't a microphone") + ")"
-                        if c.needs_confirm and not c.confirmed_by(self.enforcer.dcfg) else "")
-                act = sub.addAction(f"#{c.id} {c.node.name or '?'} — {c.reasons_text(60)}{warn}")
-                act.setCheckable(True)
-                act.setChecked(bool(self.enforcer.override) and c.serial in self.enforcer.override)
-                act.triggered.connect(lambda _checked=False, s=c.serial: self._on_pick_capture([s]))
+        self._add_capture_menu(m, st)
 
         m.addSeparator()
         self.act_quit = m.addAction(_("Quit"))
         self.act_quit.triggered.connect(self._on_quit)
         self._update_tray(st)
+
+    def _add_capture_menu(self, m: QMenu, st: Status) -> None:
+        """"Which Discord stream?" — only when detection is ambiguous or overridden."""
+        det = st.detection
+        if det is None or not (det.status == STATUS_AMBIGUOUS or self.enforcer.override):
+            return
+        sub = m.addMenu(_("Which Discord stream?"))
+        auto = sub.addAction(_("Automatic"))
+        auto.setCheckable(True)
+        auto.setChecked(not self.enforcer.override)
+        auto.triggered.connect(lambda _checked=False: self._on_pick_capture(None))
+        for c in det.candidates:
+            if c.kind == KIND_MIC:
+                continue
+            warn = (" (" + _("check that it isn't a microphone") + ")"
+                    if c.needs_confirm and not c.confirmed_by(self.enforcer.dcfg) else "")
+            act = sub.addAction(f"#{c.id} {c.node.name or '?'} — {c.reasons_text(60)}{warn}")
+            act.setCheckable(True)
+            act.setChecked(bool(self.enforcer.override) and c.serial in self.enforcer.override)
+            act.triggered.connect(lambda _checked=False, s=c.serial: self._on_pick_capture([s]))
+
+    def build_settings_menu(self) -> None:
+        """The window's menu button: stream choice (when needed), language, start at login, quit."""
+        m = self.settings_menu
+        m.clear()
+        self._add_capture_menu(m, self.enforcer.status)
+        lang = m.addMenu(_("Language"))
+        group = QActionGroup(lang)
+        current = self.enforcer.config.language
+        self.language_actions: dict[str, QAction] = {}
+        for value, name in LANGUAGE_CHOICES:
+            act = lang.addAction(name or _("Automatic (system)"))
+            act.setCheckable(True)
+            act.setChecked(value == current)
+            group.addAction(act)
+            act.triggered.connect(lambda _checked=False, v=value: self.set_language(v))
+            self.language_actions[value] = act
+        self.act_autostart = m.addAction(_("Start at login"))
+        self.act_autostart.setCheckable(True)
+        on = autostart_enabled()
+        self.act_autostart.setChecked(on)
+        if not on and not autostart_available():
+            self.act_autostart.setEnabled(False)
+            self.act_autostart.setToolTip(_("Available after installing Warpipe (install.sh)"))
+        self.act_autostart.triggered.connect(self._on_autostart)
+        m.addSeparator()
+        quit_ = m.addAction(_("Quit"))
+        quit_.triggered.connect(self._on_quit)
 
     def _update_tray(self, st: Status) -> None:
         self.tray.setIcon(self.icon_for(st))
@@ -334,6 +269,7 @@ class TrayController(QObject):
         st = getattr(self, "_pending_status", None)
         if st is not None:
             self.build_menu(st)
+            self._update_popup(st)
 
     def _on_event(self, kind: str, msg: str) -> None:
         if kind not in ("applied", "restored", "capture_found", "error", "loop", "warning"):
@@ -357,19 +293,74 @@ class TrayController(QObject):
         self.build_menu(st)
 
     def _on_activated(self, reason) -> None:
-        # Left click: the same menu as right click (users expect a menu, not a notification;
-        # the status is its first line). Right click is handled by the platform.
+        # Left click: the window (toggles). Right click: the menu, shown by the platform.
         if reason == QSystemTrayIcon.ActivationReason.Trigger:
-            self.popup_menu()
+            self.toggle_popup()
 
-    def popup_menu(self) -> None:
+    # ------------------------------------------------------------ window
+    def _update_popup(self, st: Status, force: bool = False) -> None:
+        # Only while it is shown — show_popup() refreshes it anyway.
+        if self.popup.isVisible() or force:
+            self.popup.set_model(popup_model(st, desktop_index()))
+
+    def toggle_popup(self) -> None:
+        if self.popup.isVisible():
+            self.popup.hide()
+        else:
+            self.show_popup()
+
+    def show_popup(self) -> None:
+        try:
+            st = self.enforcer.refresh("window")
+        except Exception:  # pragma: no cover
+            log.exception("refresh on window open")
+            st = self.enforcer.status
+        self._update_popup(st, force=True)
+        if QGuiApplication.platformName() == "xcb":
+            # X11 only: Wayland ignores positions, the compositor places the window.
+            self._place_popup_x11()
+        self.popup.show()
+        self.popup.raise_()
+        self.popup.activateWindow()
+
+    def _place_popup_x11(self) -> None:
         pos = QCursor.pos()
-        primary = QGuiApplication.primaryScreen()
-        x, y = menu_anchor((pos.x(), pos.y()),
-                           [_rect(s.geometry()) or (0, 0, 0, 0) for s in QGuiApplication.screens()],
-                           _rect(self.tray.geometry()),
-                           _rect(primary.availableGeometry()) if primary is not None else None)
-        self.menu.popup(QPoint(x, y))
+        anchor = _rect(self.tray.geometry()) or (pos.x(), pos.y(), 1, 1)
+        screen = (QGuiApplication.screenAt(self.tray.geometry().center()) or QGuiApplication.screenAt(pos)
+                  or QGuiApplication.primaryScreen())
+        if screen is None:
+            return
+        area = _rect(screen.availableGeometry())
+        if area is None:
+            return
+        frame = self.popup.frameGeometry()
+        w = max(frame.width(), self.popup.width())
+        h = max(frame.height(), self.popup.height())
+        x, y = place_near(w, h, anchor, area)
+        self.popup.move(x, y)
+
+    # ------------------------------------------------------------ settings
+    def set_language(self, value: str) -> None:
+        """"auto", "en" or "pl": saved, and the menu and the window switch right away."""
+        self.enforcer.set_language(value)
+        i18n.set_language(None if value == "auto" else value)
+        try:
+            st = self.enforcer.refresh("language")   # status texts in the new language
+        except Exception:  # pragma: no cover
+            log.exception("refresh after a language change")
+            st = self.enforcer.status
+        self._signature = None
+        self.build_menu(st)
+        self.popup.retranslate()
+        self._update_popup(st)
+
+    def _on_autostart(self, checked: bool) -> None:
+        try:
+            set_autostart(bool(checked))
+        except OSError as e:
+            self._on_event("error", _("Can't change start at login: {error}").format(error=e))
+        if self.act_autostart is not None:
+            self.act_autostart.setChecked(autostart_enabled())
 
     def _on_toggle_enforce(self, checked: bool) -> None:
         self.enforcer.set_enabled(bool(checked))
@@ -387,6 +378,7 @@ class TrayController(QObject):
         self.enforcer.set_capture_override(serials)
 
     def _on_quit(self) -> None:
+        self.popup.hide()
         app = QApplication.instance()
         if app is not None:
             app.quit()
@@ -452,6 +444,7 @@ def run_tray(args, config: Config, pw) -> int:
         ok, msg = enforcer.shutdown()
         if not ok:
             log.warning("restore on exit failed: %s", msg)
+        ctl.popup.hide()
         ctl.tray.hide()
         lock.release()
     return rc

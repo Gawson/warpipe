@@ -35,14 +35,18 @@ each app's output to it. Warpipe rewires exactly those links:
 
 ## Tray
 
-Click the green pipe in the system tray, tick the apps that should be heard on stream, and turn on
-**Only selected apps**. **Whole system** gives you Discord's normal behaviour back.
+**Left click: window, right click: menu.** Click the green pipe in the system tray, switch on the apps
+that should be heard on stream (that turns on **Only selected apps**), and watch what the stream
+hears, live. **Whole system** gives you Discord's normal behaviour back. Escape or another left
+click closes the window; its menu button has the language, start at login and Quit.
+
+<p align="center"><img src="docs/assets/popup.png" width="760" alt="Warpipe window, dark and light theme: Discord Go Live audio active, Warframe on stream, Firefox playing but not on stream, java (Minecraft) can be added by Warpipe, Spotify remembered while not playing"></p>
+
+The tray icon shows the state at a glance: full sound waves while Warpipe is shaping a Go Live
+stream, faded waves while it waits for one, grey in **Whole system** mode. The right-click menu has
+the same switches:
 
 <p align="center"><img src="docs/assets/tray-menu.png" width="300" alt="Warpipe tray menu: Discord Go Live audio active, only Warframe goes to Discord, Firefox and Minecraft (java) stay private"></p>
-
-A popup window with live per-app status is planned for v0.2:
-
-<p align="center"><img src="docs/assets/popup-preview-v0.2.png" width="760" alt="Mockup of the planned v0.2 popup window, dark and light theme"></p>
 
 ## Install
 

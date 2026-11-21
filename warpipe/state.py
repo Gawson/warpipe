@@ -1,6 +1,8 @@
-"""Config, link snapshot and the single-instance lock.
+"""Config, link snapshot, the single-instance lock and start at login.
 
 Config: ~/.config/warpipe/config.json (or $WARPIPE_CONFIG_DIR).
+Start at login: ~/.config/autostart/io.github.gawson.Warpipe.desktop, a copy of the
+installed desktop entry (the same file install.sh --autostart writes).
 Snapshot and lock: $XDG_RUNTIME_DIR/warpipe/ (or $WARPIPE_RUNTIME_DIR).
 The snapshot lives in the runtime directory (tmpfs) because it describes the
 current PipeWire graph — it is meaningless after logging out anyway.
@@ -18,6 +20,7 @@ import tempfile
 from pathlib import Path
 from typing import Iterable
 
+from . import DESKTOP_ID
 from .i18n import _
 from .planner import (DEFAULT_CAPTURE_NAMES, DEFAULT_MATCH_TERMS,
                       DEFAULT_MIC_NAMES, DetectConfig)
@@ -43,13 +46,12 @@ def runtime_dir() -> Path:
     return Path(tempfile.gettempdir()) / f"warpipe-{os.getuid()}"
 
 
-def _atomic_write_json(path: Path, data: dict) -> None:
+def _atomic_write(path: Path, write) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=".tmp-", dir=str(path.parent))
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2, sort_keys=True)
-            f.write("\n")
+            write(f)
         os.replace(tmp, path)
     except BaseException:
         try:
@@ -57,6 +59,55 @@ def _atomic_write_json(path: Path, data: dict) -> None:
         except OSError:
             pass
         raise
+
+
+def _atomic_write_json(path: Path, data: dict) -> None:
+    def write(f):
+        json.dump(data, f, ensure_ascii=False, indent=2, sort_keys=True)
+        f.write("\n")
+    _atomic_write(path, write)
+
+
+# ------------------------------------------------------------ start at login
+AUTOSTART_EXTRA = "X-KDE-autostart-phase=2"
+
+
+def _xdg(var: str, default: str) -> Path:
+    return Path(os.environ.get(var) or os.path.join(os.path.expanduser("~"), default))
+
+
+def autostart_file() -> Path:
+    return _xdg("XDG_CONFIG_HOME", ".config") / "autostart" / f"{DESKTOP_ID}.desktop"
+
+
+def installed_desktop_file() -> Path:
+    return _xdg("XDG_DATA_HOME", ".local/share") / "applications" / f"{DESKTOP_ID}.desktop"
+
+
+def autostart_enabled() -> bool:
+    try:
+        text = autostart_file().read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return "hidden=true" not in text.replace(" ", "").lower()
+
+
+def autostart_available() -> bool:
+    """Start at login can be switched on: Warpipe is installed (install.sh)."""
+    return installed_desktop_file().is_file()
+
+
+def set_autostart(on: bool) -> None:
+    """Copy the installed desktop entry to the autostart folder, or remove it.
+    Raises OSError (e.g. not installed)."""
+    path = autostart_file()
+    if not on:
+        path.unlink(missing_ok=True)
+        return
+    text = installed_desktop_file().read_text(encoding="utf-8")
+    if AUTOSTART_EXTRA not in text:
+        text = text.rstrip("\n") + "\n" + AUTOSTART_EXTRA + "\n"
+    _atomic_write(path, lambda f: f.write(text))
 
 
 def is_utf8_text(value) -> bool:
@@ -140,6 +191,10 @@ class Config:
         """UI language setting: "auto" (default), "en" or "pl" (see i18n)."""
         v = self.raw.get("language")
         return v if isinstance(v, str) and v.strip() else "auto"
+
+    @language.setter
+    def language(self, value: str) -> None:
+        self.raw["language"] = value if value in ("en", "pl") else "auto"
 
     @property
     def confirmed_captures(self) -> list[tuple[str, str, str]]:

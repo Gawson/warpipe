@@ -37,6 +37,11 @@ find "$APPDIR/warpipe" -name '__pycache__' -prune -exec rm -rf {} +
 cp "$SRC/bin/warpipe" "$APPDIR/warpipe-launcher"
 chmod 755 "$APPDIR/warpipe-launcher"
 mkdir -p "$APPDIR/icons" && cp -r "$SRC/data/icons/tray" "$APPDIR/icons/tray"
+# the green pipe (tray icon and window) is drawn from the app icon SVGs
+while IFS= read -r -d '' f; do
+  rel=${f#"$SRC/data/icons/"}
+  mkdir -p "$APPDIR/icons/$(dirname "$rel")" && cp "$f" "$APPDIR/icons/$rel"
+done < <(find "$SRC/data/icons/hicolor" -path '*/apps/*.svg' -print0)
 track "$APPDIR/warpipe"; track "$APPDIR/warpipe-launcher"; track "$APPDIR/icons"
 
 # launcher on PATH (wrapper, so the package is found next to the real launcher)
