@@ -118,6 +118,47 @@ elif cmd == "wait-inbound": # wait-inbound <node-id> <oczekiwane-źródła ("" =
             print(got)
             sys.exit(1)
         time.sleep(0.1)
+elif cmd == "link-lifetime":  # link-lifetime <src node.name> <dst node.name> <timeout>
+    # Watches pw-dump -m: how long (ms) did links <src> -> <dst> exist? Prints the longest,
+    # "unseen" if none showed up (too short-lived for pw-dump -m), "timeout" if one stayed.
+    import os, select
+    src, dst, timeout = args[0], args[1], float(args[2])
+    mon = subprocess.Popen(["pw-dump", "-m", "-N"], stdout=subprocess.PIPE)
+    names, links, added, lifetimes = {}, {}, {}, []
+    end = time.monotonic() + timeout
+    text = ""
+    try:
+        while time.monotonic() < end and not (lifetimes and not added):
+            r, _, _ = select.select([mon.stdout], [], [], 0.1)
+            if not r:
+                continue
+            chunk = os.read(mon.stdout.fileno(), 65536)
+            if not chunk:
+                break
+            now = time.monotonic()
+            text += chunk.decode("utf-8", "replace")
+            while "\n]\n" in text:
+                part, text = text.split("\n]\n", 1)
+                for o in json.loads(part + "\n]"):
+                    oid, info = o.get("id"), o.get("info")
+                    if info is None:
+                        if oid in added:
+                            lifetimes.append((now - added.pop(oid)) * 1000)
+                        names.pop(oid, None)
+                        links.pop(oid, None)
+                    elif o.get("type") == "PipeWire:Interface:Node" and (info.get("props") or {}).get("node.name"):
+                        names[oid] = info["props"]["node.name"]
+                    elif o.get("type") == "PipeWire:Interface:Link" and oid not in links:
+                        links[oid] = (info.get("output-node-id"), info.get("input-node-id"))
+                        if names.get(links[oid][0]) == src and names.get(links[oid][1]) == dst:
+                            added[oid] = now
+    finally:
+        mon.terminate()
+        mon.wait()
+    if added:
+        print("timeout")
+        sys.exit(1)
+    print(f"{max(lifetimes):.0f}" if lifetimes else "unseen")
 elif cmd == "managed":      # liczba naszych (oznaczonych) połączeń w całym grafie
     _, _, _, links = graph()
     print(sum(1 for l in links if "warpipe.managed" in (l["info"].get("props") or {})))
@@ -494,6 +535,33 @@ C=$(q ids dd-test-discord_capture)
 check "W4 nowy discord_capture (Go Live) -> automatycznie tylko game w ciągu 3 s" \
     q wait-inbound "$C" "dd-test-game" 3
 safe_guard
+
+# W6: Discord's notification "ding": a new short-lived stream, a new discord_capture for it,
+# WirePlumber links them — the fast path must cut that link within tens of ms (no debounce).
+q link-lifetime dd-test-ding dd-test-discord_capture 8 > "$TMP/ding.out" 2>&1 &
+LT_PID=$!
+sleep 0.7   # let the helper's pw-dump -m start
+start_app dd-test-ding 2
+q wait-node dd-test-ding 1 5 || abort "atrapa dd-test-ding się nie pojawiła"
+DING=$(q ids dd-test-ding)
+start_capture capD dd-test-discord_capture "$(q serial "$DING")" "dd-test ding capture"
+wait "$LT_PID"
+DING_MS=$(cat "$TMP/ding.out")
+info "W6 ding: połączenie dd-test-ding -> discord_capture istniało ${DING_MS} ms"
+if [ "$DING_MS" = unseen ]; then
+    info "W6 połączenie dinga żyło za krótko, by pw-dump -m je pokazał"
+    DING_MS=0
+fi
+check "W6 ding odcięty od razu (szybka ścieżka): < 150 ms (zmierzono: ${DING_MS} ms)" \
+    sh -c "test '$DING_MS' != timeout && test '${DING_MS:-9999}' -lt 150"
+D=$(new_id dd-test-discord_capture "$C")
+check "W6 nowy discord_capture dinga bez połączeń, game dalej w C" \
+    sh -c "test -n '$D' && python3 '$TMP/q.py' wait-inbound '$D' '' 2 && python3 '$TMP/q.py' wait-inbound '$C' dd-test-game 2"
+grep -q "cut a new link to the stream right away" "$TMP/watch.log" && info "W6 log narzędzia: szybkie cięcie zapisane"
+kill_pid "${PID_OF[capD]}"; unset 'PID_OF[capD]'
+kill_pid "${PID_OF[dd-test-ding]}"; unset 'PID_OF[dd-test-ding]'
+q wait-gone "$DING" 5
+check "W6 mikrofon nietknięty" mic_untouched
 
 kill -TERM "$WATCH_PID"
 WRC=124

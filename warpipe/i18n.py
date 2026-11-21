@@ -171,7 +171,9 @@ PL: dict[str, str] = {
     # ---- enforcer: routing line, events, results
     "PipeWire error": "Błąd PipeWire",
     "To Discord: all system audio": "Do Discorda: cały dźwięk systemu",
-    "To Discord: nothing (no app selected)": "Do Discorda: nic (nic nie zaznaczono)",
+    "To Discord: nothing (stream audio muted)": "Do Discorda: nic (dźwięk streamu wyciszony)",
+    "No app selected — the stream has no audio until you tick one":
+        "Nie zaznaczono żadnej aplikacji — stream nie ma dźwięku, dopóki jakiejś nie zaznaczysz",
     "To Discord only: {apps}": "Do Discorda tylko: {apps}",
     "Can't save settings: {error}": "Nie mogę zapisać ustawień: {error}",
     "Go Live audio detected.": "Wykryto stream z dźwiękiem.",

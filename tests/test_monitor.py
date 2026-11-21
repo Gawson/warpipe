@@ -211,6 +211,93 @@ class TestWatcher(unittest.TestCase):
         self.assertFalse(t.is_alive())
 
 
+class TestMonitorView(unittest.TestCase):
+    """The parser keeps the graph as the stream describes it and reports NEW links
+    into recording streams (for the fast path)."""
+
+    def setUp(self):
+        from scenarios import per_app
+        self.b, self.ns = per_app()
+        self.p = MonitorParser()
+        self.p.feed(arr(self.b.dump()))
+
+    def test_initial_state_is_not_news(self):
+        self.assertEqual(self.p.take_new_capture_links(), [])
+        from warpipe.graph import Graph
+        self.assertEqual(set(Graph.from_dump(self.p.view()).links), {o["id"] for o in self.b.objs
+                                                                    if o["type"] == "PipeWire:Interface:Link"})
+
+    def test_new_capture_links_reported(self):
+        from test_enforcer import add_ding
+        ding, cap, links, new = add_ding(self.b)
+        sink = self.b.connect(ding, self.ns.ee_sink, dst_prefix="playback")   # to a sink: not interesting
+        ours = self.b.link(self.ns.firefox.p("output_FL"), self.ns.cap_ff.p("input_FL"), managed=True)
+        new = new + [o for o in self.b.objs if o["id"] in set(sink) | {ours}]
+        self.assertTrue(self.p.feed(arr(new)))
+        self.assertEqual(self.p.take_new_capture_links(), links)
+        self.assertEqual(self.p.take_new_capture_links(), [])            # taken
+        # removal of a link and a state-only update of a node
+        self.p.feed(arr([{"id": links[0], "info": None},
+                         {"id": cap.id, "type": "PipeWire:Interface:Node",
+                          "info": {"change-mask": ["state"], "state": "idle"}}]))
+        self.assertNotIn(links[0], self.p.objects)
+        node = self.p.objects[cap.id]
+        self.assertEqual(node["info"]["state"], "idle")
+        self.assertEqual(node["info"]["props"]["node.name"], "discord_capture")   # merged, not lost
+
+    def test_unparsable_batch_disables_the_view(self):
+        from test_enforcer import add_ding
+        self.p.feed(b"[\n  { broken\n]\n")
+        ding, cap, links, new = add_ding(self.b)
+        self.p.feed(arr(new))
+        self.assertFalse(self.p.view_ok)
+        self.assertEqual(self.p.take_new_capture_links(), [])
+
+
+class TestWatcherFastPath(unittest.TestCase):
+    def test_unwanted_link_cut_before_the_debounced_refresh(self):
+        """Monitor stream -> Watcher -> Enforcer.fast_cut -> pw-link, no pw-dump, no debounce."""
+        import tempfile
+        from pathlib import Path
+
+        from helpers import FakePw
+        from scenarios import per_app
+        from test_enforcer import add_ding
+
+        from warpipe.enforcer import Enforcer
+        from warpipe.graph import Graph
+        from warpipe.state import Config, SnapshotStore
+        b, ns = per_app()
+        fake = FakePw(b)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        d = Path(tmp.name)
+        enf = Enforcer(fake, Config(d / "c.json"), SnapshotStore(d / "s.json"),
+                       enabled=True, selected=["Warframe.x64.exe"], persist=False)
+        pw = FakeMonPw()
+        w = Watcher(enf, pw, debounce=1.5, max_delay=3.0, poll_interval=60.0)
+        t = threading.Thread(target=w.run, daemon=True)
+        t.start()
+        try:
+            self.assertTrue(wait_for(lambda: pw.procs and fake.calls))
+            pw.procs[0].write(arr(b.dump()))               # the monitor's initial state
+            self.assertTrue(wait_for(lambda: w.refresh_count >= 1))
+            dumps = sum(1 for c in fake.calls if c[0] == "dump")
+            ding, cap, links, new = add_ding(b)
+            t0 = time.monotonic()
+            pw.procs[0].write(arr(new))
+            self.assertTrue(wait_for(lambda: not any(o["id"] in links for o in b.objs), 1.0))
+            elapsed = time.monotonic() - t0
+            self.assertLess(elapsed, 0.5)                   # the debounce alone is 1.5 s here
+            self.assertEqual(sum(1 for c in fake.calls if c[0] == "dump"), dumps)
+            self.assertEqual({l.out_node for l in Graph.from_dump(b.dump()).links.values()
+                              if l.in_node == ns.cap_wf.id}, {ns.warframe.id})   # the selected app stays
+        finally:
+            w.stop()
+            t.join(3)
+        self.assertFalse(t.is_alive())
+
+
 # A stand-in for the tool: starts the monitor (with `sleep <marker>` instead of
 # pw-dump), prints its PID and waits to be killed.
 _TOOL = r"""

@@ -11,6 +11,9 @@ Menu:
   (Which Discord stream? — only when detection is ambiguous)
       Quit
 
+Left click opens the same menu as right click (its first line is the status);
+see menu_anchor() for where it opens.
+
 Graph watching runs in a separate thread (Watcher); the state reaches the GUI
 through a Qt signal (queued connection between threads).
 
@@ -31,8 +34,8 @@ import threading
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QSize, QTimer, Signal
-from PySide6.QtGui import (QAction, QColor, QGuiApplication, QIcon,
+from PySide6.QtCore import QObject, QPoint, QSize, QTimer, Signal
+from PySide6.QtGui import (QAction, QColor, QCursor, QGuiApplication, QIcon,
                            QImageReader, QPalette, QPixmap)
 from PySide6.QtWidgets import (QApplication, QMenu, QMessageBox, QStyle,
                                QSystemTrayIcon)
@@ -133,6 +136,38 @@ def load_tray_icon(variant: str, state: str, icons_dir: Path | None = None) -> Q
         log.warning("could not load the tray icon %s — using the theme icon", files[0])
     names = ([f"{DESKTOP_ID}-{state}-symbolic"] if state else []) + [THEME_ICON, "audio-volume-high", "audio-card"]
     return _theme_icon(names, QStyle.StandardPixmap.SP_MediaVolume)
+
+
+Rect = tuple[int, int, int, int]   # x, y, width, height
+
+
+def _inside(p: tuple[int, int], r: Rect) -> bool:
+    x, y, w, h = r
+    return w > 0 and h > 0 and x <= p[0] < x + w and y <= p[1] < y + h
+
+
+def menu_anchor(cursor: tuple[int, int] | None, screens: list[Rect], tray: Rect | None,
+                primary_available: Rect | None) -> tuple[int, int]:
+    """Where the menu opens on a left click (QMenu.popup then keeps it on screen).
+
+    1. the mouse cursor — unless it is unusable: on Wayland QCursor.pos() is often
+       (0, 0) or a stale point outside every screen;
+    2. the centre of the tray icon, if Qt knows its geometry (often not on Wayland);
+    3. the bottom-right corner of the primary screen's available area (where the
+       system tray usually is).
+    """
+    if cursor is not None and tuple(cursor) != (0, 0) and any(_inside(cursor, s) for s in screens):
+        return int(cursor[0]), int(cursor[1])
+    if tray is not None and tray[2] > 0 and tray[3] > 0:
+        return tray[0] + tray[2] // 2, tray[1] + tray[3] // 2
+    if primary_available is not None and primary_available[2] > 0 and primary_available[3] > 0:
+        x, y, w, h = primary_available
+        return x + w - 1, y + h - 1
+    return 0, 0
+
+
+def _rect(r) -> Rect | None:
+    return (r.x(), r.y(), r.width(), r.height()) if r is not None and r.isValid() else None
 
 
 def _streams_suffix(n: int) -> str:
@@ -301,13 +336,13 @@ class TrayController(QObject):
             self.build_menu(st)
 
     def _on_event(self, kind: str, msg: str) -> None:
-        if kind not in ("applied", "restored", "capture_found", "error", "loop"):
+        if kind not in ("applied", "restored", "capture_found", "error", "loop", "warning"):
             return
         now = time.monotonic()
         if msg == self._last_msg[0] and now - self._last_msg[1] < 5.0:
             return
         self._last_msg = (msg, now)
-        icon = (QSystemTrayIcon.MessageIcon.Warning if kind in ("error", "loop")
+        icon = (QSystemTrayIcon.MessageIcon.Warning if kind in ("error", "loop", "warning")
                 else QSystemTrayIcon.MessageIcon.Information)
         if self.tray.isVisible():
             self.tray.showMessage(APP_NAME, msg, icon, 4000)
@@ -322,10 +357,19 @@ class TrayController(QObject):
         self.build_menu(st)
 
     def _on_activated(self, reason) -> None:
+        # Left click: the same menu as right click (users expect a menu, not a notification;
+        # the status is its first line). Right click is handled by the platform.
         if reason == QSystemTrayIcon.ActivationReason.Trigger:
-            st = self.enforcer.status
-            self.tray.showMessage(APP_NAME, f"{st.headline()}\n{st.routing_text()}",
-                                  QSystemTrayIcon.MessageIcon.Information, 4000)
+            self.popup_menu()
+
+    def popup_menu(self) -> None:
+        pos = QCursor.pos()
+        primary = QGuiApplication.primaryScreen()
+        x, y = menu_anchor((pos.x(), pos.y()),
+                           [_rect(s.geometry()) or (0, 0, 0, 0) for s in QGuiApplication.screens()],
+                           _rect(self.tray.geometry()),
+                           _rect(primary.availableGeometry()) if primary is not None else None)
+        self.menu.popup(QPoint(x, y))
 
     def _on_toggle_enforce(self, checked: bool) -> None:
         self.enforcer.set_enabled(bool(checked))

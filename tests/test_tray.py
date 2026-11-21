@@ -4,6 +4,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -84,6 +85,33 @@ class TestTrayIcons(unittest.TestCase):
         self.assertEqual(icon_state(Status(detection=None, enabled=True)), "")
 
 
+class TestMenuAnchor(unittest.TestCase):
+    """Left click opens the menu: where (pure function, no Qt needed)."""
+
+    SCREENS = [(0, 0, 1920, 1080), (1920, 0, 2560, 1440)]
+    TRAY = (1800, 1050, 24, 24)
+    AVAIL = (0, 0, 1920, 1040)
+
+    def test_cursor_used_when_usable(self):
+        from warpipe.tray import menu_anchor
+        self.assertEqual(menu_anchor((1850, 1060), self.SCREENS, self.TRAY, self.AVAIL), (1850, 1060))
+        self.assertEqual(menu_anchor((3000, 20), self.SCREENS, None, self.AVAIL), (3000, 20))   # 2nd screen
+
+    def test_wayland_cursor_falls_back_to_tray_geometry(self):
+        from warpipe.tray import menu_anchor
+        for bad in ((0, 0), (-5, 300), (5000, 5000), None):
+            self.assertEqual(menu_anchor(bad, self.SCREENS, self.TRAY, self.AVAIL), (1812, 1062), bad)
+
+    def test_then_bottom_right_of_primary_available_area(self):
+        from warpipe.tray import menu_anchor
+        for tray in (None, (0, 0, 0, 0), (10, 10, -1, 5)):
+            self.assertEqual(menu_anchor((0, 0), self.SCREENS, tray, self.AVAIL), (1919, 1039), tray)
+        self.assertEqual(menu_anchor((0, 0), self.SCREENS, None, (1920, 0, 2560, 1400)), (4479, 1399))
+        # nothing known at all (no screens): still a point, never an exception
+        self.assertEqual(menu_anchor((0, 0), [], None, None), (0, 0))
+        self.assertEqual(menu_anchor((0, 0), [], None, (0, 0, 0, 0)), (0, 0))
+
+
 @unittest.skipUnless(HAVE_QT, "PySide6 missing")
 class TestTrayMenu(unittest.TestCase):
     @classmethod
@@ -145,6 +173,60 @@ class TestTrayMenu(unittest.TestCase):
         self.assertIn("Tylko zaznaczone do Discorda", texts)
         self.assertIn("Cały system (przywróć)", texts)
         self.assertIn("Zakończ", texts)
+
+    def test_left_click_opens_the_menu(self):
+        from PySide6.QtCore import QPoint
+        from PySide6.QtWidgets import QSystemTrayIcon
+
+        from warpipe.tray import TrayController
+        self.enf.refresh()
+        ctl = TrayController(self.enf)
+        with mock.patch.object(ctl.menu, "popup") as popup, \
+                mock.patch.object(ctl.tray, "showMessage") as show, \
+                mock.patch("warpipe.tray.QCursor.pos", return_value=QPoint(0, 0)):
+            ctl._on_activated(QSystemTrayIcon.ActivationReason.Trigger)
+        popup.assert_called_once()
+        show.assert_not_called()                     # no status notification any more
+        pt = popup.call_args[0][0]
+        # (0, 0) cursor on Wayland -> fallback: the tray icon or the primary screen's corner
+        self.assertNotEqual((pt.x(), pt.y()), (0, 0))
+        with mock.patch.object(ctl.menu, "popup") as popup:
+            ctl._on_activated(QSystemTrayIcon.ActivationReason.Context)   # right click: the platform
+        popup.assert_not_called()
+
+    def test_empty_selection_warns(self):
+        """Enforcing with nothing ticked keeps its meaning (no audio) but is never silent."""
+        from PySide6.QtWidgets import QSystemTrayIcon
+
+        from warpipe.tray import TrayController
+        events = []
+        self.enf.refresh()
+        ctl = TrayController(self.enf)
+        self.enf.on_event = lambda k, m: events.append((k, m))
+        st = self.enf.set_enabled(True)
+        self.assertTrue(self.enf.enabled)
+        self.assertEqual(self.enf.selected, [])
+        self.assertIn(("warning", "No app selected — the stream has no audio until you tick one"), events)
+        self.assertEqual(st.routing_text(), "To Discord: nothing (stream audio muted)")
+        self.assertEqual(self.b.links_into(self.ns.cap_ff), set())   # semantics unchanged: nothing to Discord
+        self.assertEqual(self.b.links_into(self.ns.cap_wf), set())
+        # the tray shows it as a warning notification
+        with mock.patch.object(ctl.tray, "isVisible", return_value=True), \
+                mock.patch.object(ctl.tray, "showMessage") as show:
+            ctl._on_event("warning", events[-1][1])
+        show.assert_called_once()
+        self.assertEqual(show.call_args[0][2], QSystemTrayIcon.MessageIcon.Warning)
+        # ticking an app, then unticking it again while enforcing: warned again
+        events.clear()
+        self.enf.set_app_selected("Firefox", True)
+        self.assertEqual(events[-1][0], "applied")
+        self.enf.set_app_selected("Firefox", False)
+        self.assertEqual(events[-1][0], "warning")
+        i18n.set_language("pl")
+        try:
+            self.assertEqual(self.enf.status.routing_text(), "Do Discorda: nic (dźwięk streamu wyciszony)")
+        finally:
+            i18n.set_language("en")
 
     def test_about_to_show_rebuilds(self):
         from warpipe.tray import TrayController

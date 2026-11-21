@@ -28,11 +28,12 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Callable
 
-from .graph import T_LINK, T_NODE, T_PORT, Graph, _as_int
+from .graph import MANAGED_KEY, RESTORED_KEY, T_LINK, T_NODE, T_PORT, Graph, _as_int
 from .i18n import _
-from .planner import (AppEntry, Detection, DetectConfig, Op, apps_in_stream,
-                      detect, link_entry, list_apps, plan_apply, plan_restore,
-                      snapshot_originals, status_label)
+from .planner import (AppEntry, Detection, DetectConfig, Op, app_key,
+                      apps_in_stream, detect, link_entry, list_apps,
+                      plan_apply, plan_restore, snapshot_originals,
+                      status_label)
 from .pw import PwError
 from .state import Config, SnapshotStore, is_utf8_text
 
@@ -96,7 +97,7 @@ def routing_text(enabled: bool, selected: list[str]) -> str:
     if not enabled:
         return _("To Discord: all system audio")
     if not selected:
-        return _("To Discord: nothing (no app selected)")
+        return _("To Discord: nothing (stream audio muted)")
     return _("To Discord only: {apps}").format(apps=", ".join(selected))
 
 
@@ -423,6 +424,78 @@ class Enforcer:
             return False, errors[0], created_ops
         return True, action, created_ops
 
+    # ----------------------------------------------------------- fast path
+    def fast_cut(self, objects: list[dict], new_link_ids) -> list[str]:
+        """Cut NEW unwanted links into the stream audio at once (not after the debounce).
+
+        Why: Discord plays each notification sound as a new short-lived stream, opens a
+        discord_capture for it and WirePlumber links the two; waiting for the debounce
+        and a full pw-dump lets viewers hear the "ding".
+
+        `objects` is the graph as the pw-dump -m stream describes it right now (the
+        MonitorParser view), `new_link_ids` the links that appeared in it. A link is
+        cut only if ALL of these hold:
+          - enforcement is on and not paused, and the view is the same PipeWire
+            session as the last full refresh (ids are only compared within it);
+          - the link ends in the current capture group (detect() on the view, so
+            a brand-new discord_capture counts too; a microphone never does);
+          - the full plan (plan_apply, the same as the refresh) removes it;
+          - it is not ours (Warpipe's markers) and does not come from a selected app.
+        The snapshot is updated first, exactly like a full apply, so "Whole system"
+        brings such a link back (if its app is still playing).
+        Returns the descriptions of the links removed."""
+        new = {i for i in new_link_ids if isinstance(i, int)}
+        with self._lock:
+            if not new or not self.enabled or self.clock() < self._paused_until:
+                return []
+            graph = Graph.from_dump(objects)
+            if self._instance is _UNSET or graph.instance_id != self._instance:
+                return []
+            det = detect(graph, self.dcfg, self.override, self._known(graph))
+            if not det.found:
+                return []
+            selected = {k.casefold() for k in self.selected}
+            plan = plan_apply(graph, det.group_nodes, self.selected, self.dcfg,
+                              snapshot_originals(graph, self.store.data))
+            cuts = []
+            for op in plan.unlinks:
+                link = graph.links.get(op.link_id)
+                src = graph.nodes.get(op.out_node)
+                if link is None or op.link_id not in new or link.ours:
+                    continue
+                if src is not None and app_key(src).casefold() in selected:
+                    continue
+                cuts.append(op)
+            if not cuts:
+                return []
+            # 1. snapshot BEFORE the change (same as _execute_apply)
+            for c in det.group:
+                entries = [e for e in (link_entry(graph, l) for l in graph.links_into(c.id) if not l.managed) if e]
+                self.store.ensure_capture(c.serial, c.node.name, entries)
+            for op in cuts:
+                e = link_entry(graph, graph.links[op.link_id], deleted=True)
+                cap = graph.nodes.get(op.in_node)
+                if e and cap is not None:
+                    self.store.mark_deleted(cap.serial, e, cap.name)
+            try:
+                self.store.save()
+            except OSError as e:
+                log.warning("fast cut skipped — can't save the link snapshot: %s", e)
+                return []
+            # 2. remove
+            done = []
+            for op in cuts:
+                try:
+                    self.pw.unlink(op.out_port, op.in_port)
+                except PwError as e:
+                    log.warning("fast cut failed: %s (%s)", op.desc, e)
+                    continue
+                done.append(op.desc)
+                log.info("cut a new link to the stream right away: %s", op.desc)
+            if done:
+                self._note_apply(self.clock())
+            return done
+
     # ------------------------------------------------------------ restore
     def restore(self, reason: str = "") -> tuple[bool, str]:
         with self._lock:
@@ -476,10 +549,9 @@ class Enforcer:
             if on:
                 st = self.refresh("enabled")
                 if st.detection is not None and st.detection.found:
-                    self._emit("applied", self._routing_text())
+                    self._emit_applied()
                 else:
-                    self._emit("applied", _("Enabled. Takes effect when you start a Go Live stream with sound.")
-                               + " " + self._routing_text())
+                    self._emit_applied(_("Enabled. Takes effect when you start a Go Live stream with sound."))
                 return st
             ok, msg = self.restore("disabled")
             if ok:
@@ -490,6 +562,14 @@ class Enforcer:
             # A failed restore stays in the status (error) until a restore succeeds,
             # so callers (control channel, CLI, plugin) don't report success.
             return self.refresh("after restore")
+
+    def _emit_applied(self, prefix: str = "") -> None:
+        """Tell the user where the stream audio comes from now. Enforcing with nothing
+        selected keeps its meaning (nothing goes to Discord) but is never silent."""
+        if self.enabled and not self.selected:
+            self._emit("warning", _("No app selected — the stream has no audio until you tick one"))
+            return
+        self._emit("applied", (prefix + " " if prefix else "") + self._routing_text())
 
     @staticmethod
     def _check_key(key) -> None:
@@ -510,7 +590,7 @@ class Enforcer:
             self._save_config()
             st = self.refresh("selection changed")
             if self.enabled:
-                self._emit("applied", self._routing_text())
+                self._emit_applied()
             return st
 
     def set_selected(self, keys: list[str]) -> None:
@@ -650,6 +730,12 @@ class MonitorParser:
 
     feed() returns True if the batch contained a relevant change (a node/port/link
     added or removed, or a change of a node's properties/ports).
+
+    It also keeps `objects`: the current graph as the stream describes it (the
+    first array is the full state, later ones add, update or remove objects), and
+    remembers links that APPEARED after the first array — for the fast path
+    (Enforcer.fast_cut). If a batch can't be parsed, the view is no longer trusted
+    (`view_ok` False) until the monitor is restarted.
     """
 
     RELEVANT = {T_NODE, T_PORT, T_LINK}
@@ -660,6 +746,9 @@ class MonitorParser:
         self.known: dict[int, str] = {}
         self._decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         self.arrays = 0
+        self.objects: dict[int, dict] = {}
+        self.view_ok = True
+        self._new_links: list[int] = []
 
     def feed(self, data: bytes) -> bool:
         self.buf += self._decoder.decode(data)
@@ -683,22 +772,62 @@ class MonitorParser:
             except json.JSONDecodeError:
                 log.debug("monitor: failed to parse a batch, refreshing just in case")
                 relevant = True
+                self.view_ok = False
                 continue
             self.arrays += 1
             if self._classify(arr):
                 relevant = True
         return relevant
 
+    def _store(self, o: dict, oid, t, new: bool) -> None:
+        """Update the view. Stored dicts are never modified later (a Graph built
+        from them may still be in use) — an update makes a new merged dict."""
+        prev = self.objects.get(oid)
+        if new or prev is None:
+            self.objects[oid] = o
+            return
+        merged = dict(prev)
+        merged.update({k: v for k, v in o.items() if k != "info"})
+        info = dict(prev.get("info") or {})
+        info.update(o.get("info") or {})
+        merged["info"] = info
+        self.objects[oid] = merged
+
+    def view(self) -> list[dict]:
+        return list(self.objects.values())
+
+    def take_new_capture_links(self) -> list[int]:
+        """Links that appeared since the last call and end in a recording stream
+        (Stream/Input/Audio) — not ours (Warpipe's markers). Cheap pre-filter for
+        the fast path; the Enforcer decides on the full view."""
+        ids, self._new_links = self._new_links, []
+        if not self.view_ok:
+            return []
+        out = []
+        for lid in ids:
+            l = self.objects.get(lid)
+            info = (l or {}).get("info") or {}
+            props = info.get("props") or {}
+            if (l is None or l.get("type") != T_LINK or MANAGED_KEY in props or RESTORED_KEY in props):
+                continue
+            dst = self.objects.get(info.get("input-node-id"))
+            dprops = ((dst or {}).get("info") or {}).get("props") or {}
+            if dst is not None and dst.get("type") == T_NODE and dprops.get("media.class") == "Stream/Input/Audio":
+                out.append(lid)
+        return out
+
     def _classify(self, arr) -> bool:
         if not isinstance(arr, list):
             return True
         relevant = False
+        initial = self.arrays <= 1          # the first array is the state at start-up, not news
         for o in arr:
             if not isinstance(o, dict):
                 continue
             oid = o.get("id")
             if "info" in o and o["info"] is None:
                 t = self.known.pop(oid, None)
+                self.objects.pop(oid, None)
                 if t in self.RELEVANT:
                     relevant = True
                 continue
@@ -707,13 +836,19 @@ class MonitorParser:
                 continue
             prev = self.known.get(oid)
             self.known[oid] = t
+            info = o.get("info") if isinstance(o.get("info"), dict) else {}
+            cm = info.get("change-mask") or []
+            # a new object: an id we didn't know as this type, or a first emission
+            # (props in change-mask — also a removal + reuse of the id merged into one)
+            new_obj = prev != t or (t in self.RELEVANT and "props" in cm)
+            self._store(o, oid, t, new_obj)
+            if t == T_LINK and new_obj and not initial:
+                self._new_links.append(oid)
             if t not in self.RELEVANT:
                 continue
             if prev != t:
                 relevant = True
                 continue
-            info = o.get("info") or {}
-            cm = info.get("change-mask") or []
             # The first emission of an object has "props" in change-mask; later
             # param/state changes don't. Also protects against a removal and a
             # reuse of the same id being merged.
@@ -738,9 +873,11 @@ class Watcher:
         fallback_poll: float = 2.0,
         retry_delay: float = 0.5,
         clock: Callable[[], float] = time.monotonic,
+        fast_path: bool = True,
     ) -> None:
         self.enforcer = enforcer
         self.pw = pw
+        self.fast_path = fast_path
         self.retry_delay = retry_delay
         self.max_retries = 6
         self.debounce = debounce
@@ -778,6 +915,18 @@ class Watcher:
     @property
     def stopped(self) -> bool:
         return self._stop.is_set()
+
+    def _fast_cut(self, parser: "MonitorParser") -> None:
+        """New links into a recording stream: let the Enforcer cut unwanted ones NOW,
+        without waiting for the debounce (the full refresh still follows)."""
+        links = parser.take_new_capture_links()
+        fast_cut = getattr(self.enforcer, "fast_cut", None)
+        if not links or fast_cut is None or not getattr(self.enforcer, "enabled", False):
+            return
+        try:
+            fast_cut(parser.view(), links)
+        except Exception:
+            log.exception("fast cut failed (the next full refresh fixes the links)")
 
     def _do_refresh(self) -> bool:
         """Returns True if another refresh shortly is worthwhile."""
@@ -850,9 +999,13 @@ class Watcher:
                             log.warning("graph monitor exited — restarting in %.0f s", restart_at - t)
                             dirty_since = dirty_since or t
                             last_event = t
-                        elif parser is not None and parser.feed(data):
-                            dirty_since = dirty_since or t
-                            last_event = t
+                        elif parser is not None:
+                            relevant = parser.feed(data)
+                            if self.fast_path:
+                                self._fast_cut(parser)
+                            if relevant:
+                                dirty_since = dirty_since or t
+                                last_event = t
 
                 if self._stop.is_set():
                     break

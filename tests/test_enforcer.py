@@ -6,6 +6,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from helpers import FakePw, GraphBuilder, load_fixture
 from scenarios import (base_system, monitor_mode, per_app, with_apps,
@@ -538,6 +539,104 @@ class TestCaptureConfirmation(Base):
         enf2 = self.make(b, enabled=True, selected=["Firefox"], persist=False)
         self.assertEqual(enf2.refresh().capture_status, "found")
         self.assertEqual(self.inbound(b, cap2), {ns.firefox.id})
+
+
+def add_ding(b):
+    """Discord's notification sound: a new short-lived "Discord" playback stream, a new
+    discord_capture for it (target = its serial) and WirePlumber's links between them.
+    Returns (ding, capture, link ids, the new pw-dump objects)."""
+    n0 = len(b.objs)
+    ding = b.app("Discord", "Discord", node_name="Discord", media_name="notification")
+    cap = b.capture(target=ding.serial)
+    links = b.connect(ding, cap)
+    return ding, cap, links, b.objs[n0:]
+
+
+class TestFastCut(Base):
+    """Fast path: a NEW unwanted link into the stream audio is cut at once, from the
+    pw-dump -m view, without the debounce and without a full pw-dump."""
+
+    def setup_enforcing(self, **kw):
+        b, ns = per_app()
+        kw.setdefault("selected", ["Warframe.x64.exe"])
+        enf = self.make(b, enabled=True, persist=False, **kw)
+        enf.refresh()
+        self.assertEqual(self.inbound(b, ns.cap_ff), set())
+        return b, ns, enf
+
+    def dumps(self):
+        return sum(1 for c in self.fake.calls if c[0] == "dump")
+
+    def test_ding_cut_at_once_and_back_with_whole_system(self):
+        b, ns, enf = self.setup_enforcing()
+        ding, cap, links, _new = add_ding(b)
+        n = self.dumps()
+        cut = enf.fast_cut(b.dump(), links)
+        self.assertEqual(len(cut), 2)
+        self.assertEqual(self.inbound(b, cap), set())
+        self.assertEqual(self.dumps(), n)                          # decided on the monitor's view
+        self.assertEqual(self.inbound(b, ns.cap_wf), {ns.warframe.id})   # the selected app untouched
+        entries = enf.store.captures[str(cap.serial)]["links"]
+        self.assertEqual(len(entries), 2)
+        self.assertTrue(all(e["deleted"] for e in entries))
+        enf.refresh()                                              # the full refresh agrees
+        self.assertEqual(self.inbound(b, cap), set())
+        enf.set_enabled(False)                                     # "Whole system": Discord's normal state
+        self.assertEqual(self.inbound(b, cap), {ding.id})
+        self.assertEqual(self.inbound(b, ns.cap_ff), {ns.firefox.id})
+        self.assertEqual(self.managed_count(b), 0)
+
+    def test_only_new_unwanted_links_into_the_group(self):
+        b, ns, enf = self.setup_enforcing()
+        old = b.link(ns.firefox.p("output_FL"), ns.cap_wf.p("input_FL"))        # unwanted, but not new
+        sel = b.link(ns.warframe.p("output_FL"), ns.cap_ff.p("input_FL"))       # new, from the selected app
+        mic = b.link(ns.firefox.p("output_FR"), ns.rec.p("input_FR"))           # new, into the call microphone
+        ours = b.link(ns.firefox.p("output_FR"), ns.cap_ff.p("input_FR"), managed=True)  # ours
+        bad = b.link(ns.firefox.p("output_FL"), ns.cap_ff.p("input_FL"))        # new + unwanted
+        cut = enf.fast_cut(b.dump(), [sel, mic, ours, bad])
+        self.assertEqual(len(cut), 1)
+        pairs = b.all_link_pairs()
+        self.assertNotIn((ns.firefox.p("output_FL"), ns.cap_ff.p("input_FL")), pairs)
+        for lid in (old, sel, mic, ours):
+            o = next(o for o in b.objs if o.get("id") == lid)
+            self.assertIn((o["info"]["output-port-id"], o["info"]["input-port-id"]), pairs, lid)
+
+    def test_never_when_not_enforcing_paused_or_another_session(self):
+        b, ns = per_app()
+        b.core(111)
+        enf = self.make(b, enabled=False, persist=False)
+        enf.refresh()
+        ding, cap, links, _ = add_ding(b)
+        self.assertEqual(enf.fast_cut(b.dump(), links), [])           # "Whole system"
+        enf.set_enabled(True)
+        ding2, cap2, links2, _ = add_ding(b)
+        enf._paused_until = enf.clock() + 100                         # loop protection
+        self.assertEqual(enf.fast_cut(b.dump(), links2), [])
+        enf._paused_until = 0.0
+        view = b.dump()
+        view[0]["info"]["cookie"] = 222                                # PipeWire restarted: ids mean nothing
+        self.assertEqual(enf.fast_cut(view, links2), [])
+        self.assertEqual(self.inbound(b, cap2), {ding2.id})
+        self.assertEqual(len(enf.fast_cut(b.dump(), links2)), 2)      # the known session: cut
+
+    def test_no_cut_without_a_saved_snapshot(self):
+        b, ns, enf = self.setup_enforcing()
+        ding, cap, links, _ = add_ding(b)
+        with mock.patch.object(enf.store, "save", side_effect=OSError("disk full")), \
+                self.assertLogs("warpipe", "WARNING") as logs:
+            self.assertEqual(enf.fast_cut(b.dump(), links), [])
+        self.assertIn("fast cut skipped", logs.output[0])
+        self.assertEqual(self.inbound(b, cap), {ding.id})
+
+    def test_selected_app_with_a_new_capture_is_kept(self):
+        b, ns, enf = self.setup_enforcing(selected=["Warframe.x64.exe", "Spotify"])
+        n0 = len(b.objs)
+        sp = b.app("Spotify", "spotify")
+        cap = b.capture(target=sp.serial)
+        links = b.connect(sp, cap)
+        self.assertEqual(enf.fast_cut(b.dump(), links), [])
+        self.assertEqual(self.inbound(b, cap), {sp.id})
+        self.assertGreater(len(b.objs), n0)
 
 
 if __name__ == "__main__":
