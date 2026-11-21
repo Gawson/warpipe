@@ -1,4 +1,4 @@
-"""Wtyczka OpenDeck: rysowanie przycisków (Qt offscreen, bez pętli zdarzeń)."""
+"""OpenDeck plugin: key rendering (Qt offscreen, no event loop)."""
 
 import os
 import re
@@ -7,7 +7,7 @@ import unittest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 try:
-    # QApplication (a nie QGuiApplication): ten sam proces testów używa też QMenu w test_tray.
+    # QApplication (not QGuiApplication): the same test process also uses QMenu in test_tray.
     from PySide6.QtWidgets import QApplication
     HAVE_QT = True
 except Exception:  # pragma: no cover
@@ -16,12 +16,12 @@ except Exception:  # pragma: no cover
 import helpers  # noqa: F401
 from fake_opendeck import decode_data_url, png_size, png_text
 
-# Wyrażenie z OpenDeck 2.14 (src/lib/rendererHelper.ts, getImage)
+# Regex from OpenDeck 2.14 (src/lib/rendererHelper.ts, getImage)
 OPENDECK_BASE64_RE = re.compile(
     r"^data:image/(apng|avif|gif|jpeg|png|svg\+xml|webp|bmp|x-icon|tiff);base64,([A-Za-z0-9+/]+={0,2})?$")
 
 
-@unittest.skipUnless(HAVE_QT, "brak PySide6")
+@unittest.skipUnless(HAVE_QT, "no PySide6")
 class TestRender(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -35,20 +35,22 @@ class TestRender(unittest.TestCase):
         V = L.Visual
         return [
             V("app", L.S_UNSET, L.UNSET_LABEL, ""),
-            V("app", L.S_DOWN, "Warframe", "uruchom"),
-            V("app", L.S_STARTING, "Warframe", "uruchamiam…"),
-            V("app", L.S_ERROR, "Warframe", "błąd"),
-            V("app", L.S_ABSENT, "Warframe", "brak"),
-            V("app", L.S_ABSENT, "Warframe", "brak", True),
-            V("app", L.S_NOSTREAM, "Warframe", "brak streamu"),
-            V("app", L.S_NOSTREAM, "Warframe", "brak streamu", True),
-            V("app", L.S_UNSURE, "Warframe", "niepewny"),
+            V("app", L.S_DOWN, "Warframe", "start"),
+            V("app", L.S_STARTING, "Warframe", "starting…"),
+            V("app", L.S_ERROR, "Warframe", "error"),
+            V("app", L.S_ABSENT, "Warframe", "not playing"),
+            V("app", L.S_ABSENT, "Warframe", "not playing", True),
+            V("app", L.S_NOSTREAM, "Warframe", "no stream"),
+            V("app", L.S_NOSTREAM, "Warframe", "no stream", True),
+            V("app", L.S_UNSURE, "Warframe", "unsure"),
             V("app", L.S_OFF, "Warframe", ""),
             V("app", L.S_OFF, "Warframe", "", True),
-            V("app", L.S_ON, "Warframe", "na streamie"),
-            V("system", L.S_SYS_ON, "Cały system", "włączony"),
+            V("app", L.S_ON, "Warframe", "on stream"),
+            V("system", L.S_SYS_ON, "Whole system", "on"),
+            V("system", L.S_SYS_OFF, "Whole system", "only selected"),
+            V("system", L.S_DOWN, "Whole system", "start"),
+            # Polish translation (non-ASCII text goes into iTXt metadata)
             V("system", L.S_SYS_OFF, "Cały system", "tylko wybrane"),
-            V("system", L.S_DOWN, "Cały system", "uruchom"),
         ]
 
     def test_png_data_urls_accepted_by_opendeck(self):
@@ -61,12 +63,12 @@ class TestRender(unittest.TestCase):
             self.assertEqual(png_size(png), (144, 144))
             meta = png_text(png)
             self.assertEqual(meta["ddstate"], v.tag)
-            self.assertEqual(meta["ddlabel"], v.label)       # także z polskimi znakami (iTXt)
+            self.assertEqual(meta["ddlabel"], v.label)       # also with non-ASCII text (iTXt)
             self.assertEqual(meta["ddbadge"], v.badge)
             self.assertEqual(meta["ddring"], "1" if v.ring else "0")
-            self.assertLess(len(url), 40_000)                # obrazek trafia do profilu OpenDeck
+            self.assertLess(len(url), 40_000)                # the image is stored in the OpenDeck profile
             urls.add(url)
-        self.assertEqual(len(urls), len(self.all_visuals()))  # każdy stan wygląda inaczej
+        self.assertEqual(len(urls), len(self.all_visuals()))  # every state looks different
 
     def test_cache(self):
         r = self.R.Renderer()
@@ -76,9 +78,9 @@ class TestRender(unittest.TestCase):
 
     def test_colours(self):
         L, R = self.L, self.R
-        on = R.render(L.Visual("app", L.S_ON, "Warframe", "na streamie"))
-        absent = R.render(L.Visual("app", L.S_ABSENT, "Warframe", "brak"))
-        down = R.render(L.Visual("app", L.S_DOWN, "Warframe", "uruchom"))
+        on = R.render(L.Visual("app", L.S_ON, "Warframe", "on stream"))
+        absent = R.render(L.Visual("app", L.S_ABSENT, "Warframe", "not playing"))
+        down = R.render(L.Visual("app", L.S_DOWN, "Warframe", "start"))
         ring = R.render(L.Visual("app", L.S_OFF, "Warframe", "", True))
         plain = R.render(L.Visual("app", L.S_OFF, "Warframe", ""))
 
@@ -87,13 +89,13 @@ class TestRender(unittest.TestCase):
             return c.red(), c.green(), c.blue()
 
         r, g, b = rgb(on, 10, 60)
-        self.assertGreater(g, r + 40)          # zielony = na streamie
+        self.assertGreater(g, r + 40)          # green = on stream
         r, g, b = rgb(absent, 10, 60)
-        self.assertLess(max(r, g, b), 40)      # przygaszony
+        self.assertLess(max(r, g, b), 40)      # dimmed
         r, g, b = rgb(down, 10, 60)
-        self.assertGreater(r, g + 30)          # czerwony = narzędzie nie działa
+        self.assertGreater(r, g + 30)          # red = the tool is not running
         r, g, b = rgb(ring, 3, 72)
-        self.assertGreater(g, 150)             # zielona ramka = zaznaczona
+        self.assertGreater(g, 150)             # green ring = selected
         r, g, b = rgb(plain, 3, 72)
         self.assertLess(g, 100)
 

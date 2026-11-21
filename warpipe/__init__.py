@@ -1,17 +1,19 @@
-"""Warpipe — wybór aplikacji, których dźwięk trafia do streamu Discorda.
+"""Warpipe — pick which apps are heard in your Discord Go Live stream.
 
-Moduły:
-  graph    — model grafu PipeWire zbudowany z wyjścia pw-dump (bez efektów ubocznych)
-  planner  — czysta logika: wykrywanie przechwytywania Discorda, lista aplikacji,
-             plan połączeń (apply) i przywracania (restore)
-  pw       — adapter wywołujący pw-dump / pw-link
-  state    — konfiguracja, migawka połączeń, blokada pojedynczej instancji
-  enforcer — pętla pilnująca połączeń (pw-dump --monitor + debounce)
-  control  — kanał sterowania działającą instancją (gniazdo Unix, JSON w liniach)
-  cli      — interfejs wiersza poleceń
-  tray     — ikona w zasobniku (PySide6)
+Modules:
+  graph    — PipeWire graph model built from pw-dump output (no side effects)
+  planner  — pure logic: Discord capture detection, app list, link plan (apply)
+             and restore plan
+  pw       — adapter calling pw-dump / pw-link
+  state    — config, link snapshot, single-instance lock
+  enforcer — the loop that keeps the links right (pw-dump --monitor + debounce)
+  control  — control channel of the running instance (Unix socket, JSON lines)
+  i18n     — tiny translation helper (English UI, optional Polish)
+  cli      — command-line interface
+  tray     — system tray icon (PySide6)
 """
 
 __version__ = "1.1.0"
 APP_NAME = "Warpipe"
 APP_ID = "warpipe"
+DESKTOP_ID = "io.github.gawson.Warpipe"  # .desktop file / icon theme name

@@ -1,19 +1,19 @@
-"""Czysta logika: wykrywanie przechwytywania Discorda, lista aplikacji, plan połączeń.
+"""Pure logic: detecting Discord's capture streams, listing apps, planning links.
 
-Wejście: Graph (z pw-dump), konfiguracja wykrywania, wybrane klucze aplikacji.
-Wyjście: lista operacji (link/unlink) do wykonania przez adapter pw.
+Input: a Graph (from pw-dump), the detection config, the selected app keys.
+Output: a list of operations (link/unlink) for the pw adapter to execute.
 
-Nic tutaj nie dotyka PipeWire — to pozwala testować całość na zrzutach.
+Nothing here touches PipeWire, so everything can be tested on snapshots.
 
-Jak działa oficjalny Discord (Linux, 2025-2026): dla każdego strumienia
-odtwarzania aplikacji (sink-input z application.process.id) otwiera przez
-pipewire-pulse osobny strumień nagrywania "discord_capture" / "game capture"
-z target.object = object.serial tego strumienia. WirePlumber łączy wtedy
-wyjścia aplikacji bezpośrednio z wejściami tego strumienia (tryb "per
-aplikacja"). Inne klienty (albo przyszłe wersje) mogą zamiast tego czytać
-monitor wyjścia audio (tryb "monitor"). Planer obsługuje oba przypadki: grupa
-węzłów przechwytujących ma dostać na wejściach WYŁĄCZNIE wyjścia wybranych
-aplikacji, każda wybrana aplikacja dokładnie raz.
+How the official Discord client works (Linux, 2025-2026): for every app
+playback stream (a sink-input with application.process.id) it opens, through
+pipewire-pulse, a separate recording stream "discord_capture" / "game capture"
+with target.object = the object.serial of that stream. WirePlumber then links
+the app's outputs directly to that stream's inputs ("per-app" mode). Other
+clients (or future versions) may read an audio output monitor instead
+("monitor" mode). The planner handles both: the group of capture nodes must
+receive ONLY the outputs of the selected apps on its inputs, each selected app
+exactly once.
 """
 
 from __future__ import annotations
@@ -23,11 +23,12 @@ from dataclasses import dataclass, field
 from typing import Iterable
 
 from .graph import Graph, Link, Node, Port, _as_int
+from .i18n import N_, _, ngettext
 
 DEFAULT_MATCH_TERMS = ("discord", "vesktop", "vencord", "venmic", "webrtc")
-# Nazwy, które jednoznacznie oznaczają strumień dźwięku do streamu (Go Live).
+# Names that unambiguously mean the stream (Go Live) audio capture.
 DEFAULT_CAPTURE_NAMES = ("discord_capture", "game capture")
-# Nazwy, które oznaczają mikrofon rozmowy — nigdy nie wybierać.
+# Names that mean the call microphone — never pick these.
 DEFAULT_MIC_NAMES = ("WEBRTC VoiceEngine", "recStream")
 
 VESKTOP_SHARE_NODE = "vencord-screen-share"
@@ -46,10 +47,10 @@ KIND_SCREENSHARE = "screenshare"
 KIND_MIC = "mic"
 KIND_UNKNOWN = "unknown"
 
-KIND_LABEL_PL = {
-    KIND_SCREENSHARE: "dźwięk streamu",
-    KIND_MIC: "mikrofon (pomijam)",
-    KIND_UNKNOWN: "nie wiadomo",
+KIND_LABEL = {
+    KIND_SCREENSHARE: N_("stream audio"),
+    KIND_MIC: N_("microphone (skipped)"),
+    KIND_UNKNOWN: N_("unknown"),
 }
 
 STATUS_FOUND = "found"
@@ -57,12 +58,18 @@ STATUS_NONE = "none"
 STATUS_AMBIGUOUS = "ambiguous"
 STATUS_INVALID = "invalid"
 
-STATUS_LABEL_PL = {
-    STATUS_FOUND: "Stream z dźwiękiem: wykryty",
-    STATUS_NONE: "Stream z dźwiękiem: nie wykryty",
-    STATUS_AMBIGUOUS: "Stream z dźwiękiem: niepewny — wybierz w menu",
-    STATUS_INVALID: "Stream z dźwiękiem: zły wybór węzła",
+STATUS_LABEL = {
+    STATUS_FOUND: N_("Discord Go Live audio: active"),
+    STATUS_NONE: N_("Discord Go Live audio: not detected"),
+    STATUS_AMBIGUOUS: N_("Discord Go Live audio: ambiguous — pick one in the menu"),
+    STATUS_INVALID: N_("Discord Go Live audio: invalid node choice"),
 }
+STATUS_UNKNOWN_LABEL = N_("Discord Go Live audio: ?")
+
+
+def status_label(status: str) -> str:
+    """Translated one-line description of a detection status."""
+    return _(STATUS_LABEL.get(status, STATUS_UNKNOWN_LABEL))
 
 
 @dataclass(frozen=True)
@@ -70,12 +77,12 @@ class DetectConfig:
     match_terms: tuple[str, ...] = DEFAULT_MATCH_TERMS
     capture_names: tuple[str, ...] = DEFAULT_CAPTURE_NAMES
     mic_names: tuple[str, ...] = DEFAULT_MIC_NAMES
-    # Potwierdzone przez użytkownika strumienie „z monitora”: (program, node.name, wyjście).
+    # "Monitor-only" streams confirmed by the user: (program, node.name, output sink).
     confirmed: tuple[tuple[str, str, str], ...] = ()
 
 
 # --------------------------------------------------------------------------
-# Tożsamość aplikacji
+# App identity
 # --------------------------------------------------------------------------
 
 def _is_generic_loader(name: str | None) -> bool:
@@ -90,13 +97,13 @@ def _is_generic_loader(name: str | None) -> bool:
 
 
 def app_key(node: Node) -> str:
-    """Klucz tożsamości aplikacji (zapisywany w konfiguracji).
+    """App identity key (stored in the config).
 
     application.name -> application.process.binary -> node.name.
-    Binarka bywa ogólnym „ładowaczem” (wine64-preloader, java, python3, electron,
-    albo *.exe uruchamiane przez wine) — dlatego application.name ma pierwszeństwo
-    (dla gier z Protona to zwykle nazwa .exe). Gdy samo application.name jest
-    nazwą ładowacza, a node.name jest bardziej konkretne, używamy node.name.
+    The binary is often a generic "loader" (wine64-preloader, java, python3,
+    electron, or an *.exe run by wine) — so application.name wins (for Proton
+    games it is usually the .exe name). When application.name itself is a
+    loader name and node.name is more specific, node.name is used.
     """
     an, bn, nn = node.app_name, node.binary, (node.name or None)
     if an and _is_generic_loader(an) and nn and nn != an and not _is_generic_loader(nn):
@@ -125,16 +132,16 @@ def _matches_terms(node: Node, terms: Iterable[str]) -> bool:
 
 
 def is_discordish(node: Node, cfg: DetectConfig) -> bool:
-    """Czy węzeł należy do klienta Discorda (do WYKRYWANIA przechwytywania — terminy z konfiguracji)."""
+    """Does the node belong to a Discord client (for capture DETECTION — terms from the config)."""
     return _matches_terms(node, cfg.match_terms)
 
 
 def is_discord_own_stream(node: Node, cfg: DetectConfig) -> bool:
-    """Czy strumień odtwarzania należy do Discorda (np. playStream = głosy z rozmowy).
+    """Does the playback stream belong to Discord (e.g. playStream = voices from the call)?
 
-    Niezależne od zawężenia capture_match_terms w konfiguracji: domyślne terminy
-    zawsze obowiązują, a nazwy mikrofonu/przechwytywania też wykluczają.
-    Takich strumieni nigdy nie pokazujemy ani nie łączymy.
+    Independent of narrowing capture_match_terms in the config: the default
+    terms always apply, and microphone/capture names exclude a stream too.
+    Such streams are never shown or linked.
     """
     if _matches_terms(node, tuple(DEFAULT_MATCH_TERMS) + tuple(cfg.match_terms)):
         return True
@@ -154,21 +161,28 @@ def _names_lc(node: Node) -> set[str]:
 
 
 # --------------------------------------------------------------------------
-# Wykrywanie węzła przechwytującego
+# Capture node detection
 # --------------------------------------------------------------------------
 
-R_TARGET_APP = "cel: strumień aplikacji"
-R_TARGET_SINK = "cel: wyjście audio (monitor)"
-R_TARGET_VSS = "cel: vencord-screen-share"
+# Detection reasons: English msgids (stable, also in --list --json); translate
+# with _() / Candidate.reasons_text() when showing them.
+R_TARGET_APP = N_("target: app stream")
+R_TARGET_SINK = N_("target: audio output (monitor)")
+R_TARGET_VSS = N_("target: vencord-screen-share")
 R_CAPTURE_SINK = "stream.capture.sink"
-R_KNOWN = "rozpoznany wcześniej"
-R_IN_MONITOR = "wejście z monitora wyjścia"
-R_IN_APP = "wejście ze strumienia aplikacji"
-R_IN_VSS = "wejście z vencord-screen-share"
+R_KNOWN = N_("recognized earlier")
+R_IN_MONITOR = N_("input from an output monitor")
+R_IN_APP = N_("input from an app stream")
+R_IN_VSS = N_("input from vencord-screen-share")
+R_TARGET_MIC = N_("target: microphone/source")
+R_IN_MIC = N_("input from a microphone/source")
+R_MIC_NAME = N_("named like the call microphone")
+R_CAPTURE_NAME = N_("named discord_capture/game capture")
+R_NOTHING = N_("no links and no target")
 
-# Słabe dowody: tak samo wygląda dźwięk streamu czytający monitor wyjścia
-# i MIKROFON ustawiony na monitor (wirtualny mikrofon, soundboard). Sam taki
-# dowód nie wystarcza do automatycznego wyboru — użytkownik musi raz potwierdzić.
+# Weak evidence: stream audio reading an output monitor looks exactly like a
+# MICROPHONE set to a monitor (virtual mic, soundboard). Such evidence alone is
+# not enough for an automatic choice — the user has to confirm it once.
 WEAK_REASONS = frozenset({R_TARGET_SINK, R_CAPTURE_SINK, R_IN_MONITOR})
 
 
@@ -181,8 +195,8 @@ class Candidate:
     own_app: Node | None = None
     mic_linked: bool = False
     muted: bool = False
-    weak: bool = False                          # dźwięk streamu tylko po monitorze/celu-wyjściu
-    sinks: list[str] = field(default_factory=list)  # wyjścia, których monitor czyta
+    weak: bool = False                          # stream audio only by monitor/sink-target evidence
+    sinks: list[str] = field(default_factory=list)  # output sinks whose monitor it reads
 
     @property
     def id(self) -> int:
@@ -193,7 +207,7 @@ class Candidate:
         return self.node.serial
 
     def signatures(self) -> list[tuple[str, str, str]]:
-        """Klucze potwierdzenia: (program, node.name, wyjście) — bez media.name."""
+        """Confirmation keys: (program, node.name, output sink) — no media.name."""
         who = self.node.binary or self.node.app_name or ""
         return [(who, self.node.name, s) for s in self.sinks]
 
@@ -206,15 +220,20 @@ class Candidate:
         return self.kind == KIND_SCREENSHARE and not self.strong and self.weak
 
     def summary(self) -> str:
-        """Opis bez media.name — można logować."""
+        """Description without media.name — safe to log."""
         who = self.node.binary or self.node.app_name or "?"
-        own = f", aplikacja: {app_key(self.own_app)}" if self.own_app else ""
+        own = _(", app: {app}").format(app=app_key(self.own_app)) if self.own_app else ""
         return (f"#{self.node.id} {self.node.name or '?'} [{who}] — "
-                f"{KIND_LABEL_PL[self.kind]}{own}")
+                f"{_(KIND_LABEL[self.kind])}{own}")
+
+    def reasons_text(self, limit: int | None = None) -> str:
+        """Translated, comma-separated detection reasons."""
+        text = ", ".join(_(r) for r in self.reasons)
+        return text[:limit] if limit else text
 
 
 def own_app_of(graph: Graph, node: Node) -> Node | None:
-    """Strumień aplikacji, który ten węzeł nagrywa (target.object = serial strumienia)."""
+    """The app stream this node records (target.object = the stream's serial)."""
     tgt = node.target_object
     if tgt is None:
         return None
@@ -227,12 +246,12 @@ def own_app_of(graph: Graph, node: Node) -> Node | None:
 
 
 def classify(graph: Graph, node: Node, cfg: DetectConfig, known: bool = False) -> Candidate:
-    """Ocena węzła nagrywania Discorda.
+    """Classify a Discord recording node.
 
-    known=True: ten węzeł był już wcześniej rozpoznany jako dźwięk streamu
-    (w tej sesji albo jest w migawce). To ważne w trybie „monitor”: po naszej
-    zmianie jedynym dowodem są nasze połączenia, a gdy wybrana aplikacja się
-    zamknie, węzeł zostaje bez żadnych połączeń.
+    known=True: this node was already recognized as stream audio earlier (in
+    this session, or it is in the snapshot). This matters in "monitor" mode:
+    after our change the only evidence left is our own links, and when the
+    selected app quits the node is left with no links at all.
     """
     names = _names_lc(node)
     strong = any(n.casefold() in names for n in cfg.capture_names if n)
@@ -255,7 +274,7 @@ def classify(graph: Graph, node: Node, cfg: DetectConfig, known: bool = False) -
             pos.append(R_TARGET_VSS)
         elif mc.startswith("Audio/Source"):
             if not node.capture_sink:
-                neg.append("cel: mikrofon/źródło")
+                neg.append(R_TARGET_MIC)
     if node.capture_sink:
         pos.append(R_CAPTURE_SINK)
     if known:
@@ -275,7 +294,7 @@ def classify(graph: Graph, node: Node, cfg: DetectConfig, known: bool = False) -
         elif src.name == VESKTOP_SHARE_NODE:
             pos.append(R_IN_VSS)
         elif mc.startswith("Audio/Source"):
-            neg.append("wejście z mikrofonu/źródła")
+            neg.append(R_IN_MIC)
             mic_linked = True
 
     pos = list(dict.fromkeys(pos))
@@ -283,10 +302,10 @@ def classify(graph: Graph, node: Node, cfg: DetectConfig, known: bool = False) -
     weak = bool(pos) and all(r in WEAK_REASONS for r in pos)
     if mic_marker:
         kind = KIND_MIC
-        reasons = ["nazwa jak mikrofon rozmowy"] + neg + pos
+        reasons = [R_MIC_NAME] + neg + pos
     elif strong:
         kind = KIND_SCREENSHARE
-        reasons = ["nazwa discord_capture/game capture"] + pos + neg
+        reasons = [R_CAPTURE_NAME] + pos + neg
     elif pos and not neg:
         kind = KIND_SCREENSHARE
         reasons = pos
@@ -295,7 +314,7 @@ def classify(graph: Graph, node: Node, cfg: DetectConfig, known: bool = False) -
         reasons = neg
     else:
         kind = KIND_UNKNOWN
-        reasons = (pos + neg) or ["brak połączeń i celu"]
+        reasons = (pos + neg) or [R_NOTHING]
     return Candidate(
         node=node, kind=kind, strong=strong and not mic_marker, reasons=reasons,
         own_app=own_app, mic_linked=mic_linked, muted=node.mute_state(),
@@ -331,10 +350,10 @@ def capture_candidates(graph: Graph, cfg: DetectConfig, known_serials: Iterable[
 
 def detect(graph: Graph, cfg: DetectConfig, override_serials: Iterable[int] | None = None,
            known_serials: Iterable[int] = ()) -> Detection:
-    """Wybór grupy węzłów przechwytujących.
+    """Pick the group of capture nodes.
 
-    override_serials — ręczny wybór (CLI --capture / menu); known_serials —
-    węzły rozpoznane wcześniej (patrz classify).
+    override_serials — manual choice (CLI --capture / menu); known_serials —
+    nodes recognized earlier (see classify).
     """
     cands = capture_candidates(graph, cfg, known_serials)
     override = list(override_serials or [])
@@ -349,52 +368,57 @@ def detect(graph: Graph, cfg: DetectConfig, override_serials: Iterable[int] | No
                 if n is not None and n.media_class == "Stream/Input/Audio":
                     c = classify(graph, n, cfg)
             if c is None:
-                problems.append(f"węzeł o serialu {ser} nie istnieje albo nie jest strumieniem nagrywania")
+                problems.append(_("node with serial {serial} does not exist or is not a recording stream")
+                                .format(serial=ser))
             elif c.kind == KIND_MIC:
-                problems.append(f"#{c.id} wygląda na mikrofon — nie ruszam go")
+                problems.append(_("#{id} looks like a microphone — leaving it alone").format(id=c.id))
             else:
                 group.append(c)
         if problems:
             return Detection(STATUS_INVALID, [], cands, "; ".join(problems))
-        det = Detection(STATUS_FOUND, group, cands, "wybrany ręcznie")
+        det = Detection(STATUS_FOUND, group, cands, _("chosen manually"))
     else:
         strong = [c for c in cands if c.strong and c.kind == KIND_SCREENSHARE]
         generic = [c for c in cands if not c.strong and c.kind == KIND_SCREENSHARE]
-        # Tylko po monitorze wyjścia = może to być mikrofon na monitorze; bez
-        # wcześniejszego potwierdzenia użytkownika nie wybieramy automatycznie.
+        # Monitor-only evidence = it could be a microphone set to a monitor; without
+        # an earlier confirmation from the user we don't pick it automatically.
         auto = [c for c in generic if not c.needs_confirm or c.confirmed_by(cfg)]
         unknown = [c for c in cands if c.kind == KIND_UNKNOWN]
         if strong:
             det = Detection(STATUS_FOUND, strong, cands,
-                            f"{len(strong)} strumień(e) discord_capture")
+                            ngettext("{n} discord_capture stream", "{n} discord_capture streams",
+                                     len(strong)).format(n=len(strong)))
         elif len(auto) == 1:
-            det = Detection(STATUS_FOUND, auto, cands, "strumień rozpoznany po połączeniach")
+            det = Detection(STATUS_FOUND, auto, cands, _("stream recognized by its links"))
         elif generic and not auto:
             det = Detection(STATUS_AMBIGUOUS, [], cands,
-                            "strumień Discorda czyta monitor wyjścia — to może być też mikrofon; "
-                            "potwierdź raz w menu (albo --capture ID)")
-            det.warnings.append("Strumień Discorda czyta monitor wyjścia — to może być mikrofon. "
-                                "Jeśli to dźwięk streamu, wybierz go raz w „Który strumień Discorda?”.")
+                            _("the Discord stream reads an output monitor — it could also be a microphone; "
+                              "confirm it once in the menu (or with --capture ID)"))
+            det.warnings.append(_("The Discord stream reads an output monitor — it could be a microphone. "
+                                  "If it is the stream audio, pick it once under “Which Discord stream?”."))
         elif generic or unknown:
             det = Detection(STATUS_AMBIGUOUS, [], cands,
-                            "nie wiem, który strumień Discorda to dźwięk streamu — wybierz ręcznie")
+                            _("can't tell which Discord stream carries the stream audio — pick one manually"))
         else:
-            det = Detection(STATUS_NONE, [], cands, "brak strumienia dźwięku streamu (Go Live bez dźwięku albo wyłączony)")
+            det = Detection(STATUS_NONE, [], cands,
+                            _("no stream audio capture (Go Live without sound, or not streaming)"))
 
     for c in det.group:
         if c.mic_linked:
-            det.warnings.append(f"Uwaga: do dźwięku streamu (#{c.id}) podłączony jest mikrofon/źródło.")
+            det.warnings.append(_("Warning: a microphone/source is connected to the stream audio (#{id}).")
+                                .format(id=c.id))
         if c.muted:
-            det.warnings.append(f"Uwaga: przechwytywanie dźwięku streamu (#{c.id}) jest wyciszone — widzowie nic nie usłyszą.")
+            det.warnings.append(_("Warning: the stream audio capture (#{id}) is muted — viewers will hear nothing.")
+                                .format(id=c.id))
     return det
 
 
 # --------------------------------------------------------------------------
-# Aplikacje
+# Apps
 # --------------------------------------------------------------------------
 
 def app_streams(graph: Graph, cfg: DetectConfig) -> list[Node]:
-    """Strumienie odtwarzania, które można wybrać (bez Discorda i węzłów venmic)."""
+    """Playback streams that can be selected (without Discord and venmic nodes)."""
     out = []
     for n in sorted(graph.nodes.values(), key=lambda n: n.serial):
         if n.media_class != "Stream/Output/Audio":
@@ -418,7 +442,7 @@ class AppEntry:
         return any(n.has_pid for n in self.nodes)
 
     def hints(self) -> list[str]:
-        """Tytuły strumieni — TYLKO do pokazania w UI, nigdy do logów/konfiguracji."""
+        """Stream titles — ONLY for showing in the UI, never for logs/config."""
         return [n.media_name for n in self.nodes if n.media_name]
 
 
@@ -435,8 +459,8 @@ def list_apps(graph: Graph, cfg: DetectConfig) -> list[AppEntry]:
 
 
 def apps_in_stream(graph: Graph, group: Iterable[Node], apps: Iterable[AppEntry]) -> list[str]:
-    """Klucze aplikacji, których wyjście JEST TERAZ połączone z którymkolwiek węzłem
-    grupy przechwytującej (stan faktyczny grafu, nie „zaznaczone”)."""
+    """Keys of apps whose output IS NOW linked to any node of the capture group
+    (the actual graph state, not "selected")."""
     group_ids = {n.id for n in group}
     if not group_ids:
         return []
@@ -445,7 +469,7 @@ def apps_in_stream(graph: Graph, group: Iterable[Node], apps: Iterable[AppEntry]
 
 
 # --------------------------------------------------------------------------
-# Dopasowanie kanałów
+# Channel matching
 # --------------------------------------------------------------------------
 
 LEFT = {"FL", "RL", "SL", "FLC", "RLC", "TFL", "TRL", "FLW", "FLH", "TSL", "BLC", "LLFE"}
@@ -458,10 +482,10 @@ def _is_mono(ports: list[Port]) -> bool:
 
 
 def channel_pairs(outs: list[Port], ins: list[Port]) -> list[tuple[int, int]]:
-    """Pary (port wyjściowy, port wejściowy).
+    """(output port, input port) pairs.
 
-    FL->FL, FR->FR; mono aplikacja -> wszystkie wejścia; mono wejście <- wszystkie
-    kanały; nieznane kanały -> kolejność portów.
+    FL->FL, FR->FR; mono app -> all inputs; mono input <- all channels;
+    unknown channels -> port order.
     """
     if not outs or not ins:
         return []
@@ -502,20 +526,20 @@ class Op:
     out_node: int
     in_node: int
     link_id: int | None = None
-    managed: bool = False  # link: utwórz z naszym znacznikiem; unlink: link był nasz
-    desc: str = ""         # bez media.name
-    # object.serial portów w chwili planowania — id portów PipeWire używa ponownie,
-    # więc po wykonaniu sprawdzamy, czy połączenie trafiło tam, gdzie miało.
+    managed: bool = False  # link: create with our marker; unlink: the link was ours
+    desc: str = ""         # no media.name
+    # object.serial of the ports at planning time — PipeWire reuses port ids,
+    # so after executing we check that the link ended up where it was meant to.
     out_serial: int | None = None
     in_serial: int | None = None
-    original: bool = False  # link: odtworzenie połączenia z migawki (bez znacznika)
+    original: bool = False  # link: recreating a link from the snapshot (no marker)
 
 
 @dataclass
 class Plan:
     ops: list[Op] = field(default_factory=list)
     desired: set[tuple[int, int]] = field(default_factory=set)
-    routes: list[tuple[int, int]] = field(default_factory=list)  # (węzeł aplikacji, węzeł przechwytujący)
+    routes: list[tuple[int, int]] = field(default_factory=list)  # (app node, capture node)
     notes: list[str] = field(default_factory=list)
 
     @property
@@ -526,7 +550,7 @@ class Plan:
     def unlinks(self) -> list[Op]:
         return [o for o in self.ops if o.kind == "unlink"]
 
-    def __bool__(self) -> bool:  # pragma: no cover - wygoda
+    def __bool__(self) -> bool:  # pragma: no cover - convenience
         return bool(self.ops)
 
 
@@ -559,12 +583,12 @@ def _unlink_op(graph: Graph, l: Link) -> Op:
 
 def plan_apply(graph: Graph, group: list[Node], selected_keys: Iterable[str], cfg: DetectConfig,
                originals: Iterable[tuple[int, int]] = ()) -> Plan:
-    """Plan dla grupy węzłów przechwytujących.
+    """Plan for a group of capture nodes.
 
-    originals — pary (serial portu wyjściowego, serial portu wejściowego) połączeń,
-    które były w grafie przed naszymi zmianami (migawka). Jeśli trzeba je znowu
-    utworzyć, robimy to BEZ znacznika: to znowu oryginał, a nie nasze połączenie
-    („oznaczone” = „do usunięcia przy przywracaniu”).
+    originals — (output port serial, input port serial) pairs of links that
+    existed before our changes (the snapshot). If they have to be created again,
+    they are created WITHOUT the marker: that is the original again, not our link
+    ("marked" = "remove on restore").
     """
     plan = Plan()
     originals = set(originals)
@@ -584,8 +608,8 @@ def plan_apply(graph: Graph, group: list[Node], selected_keys: Iterable[str], cf
     selected_ids = {n.id for n in streams}
     inbound = [l for l in graph.links.values() if l.in_node in group_ids]
 
-    # Węzeł-„nośnik” dla wybranych aplikacji, które nie mają własnego strumienia
-    # przechwytującego (np. Minecraft bez PID). Najpierw ten, który już taką rolę pełni.
+    # "Carrier" node for selected apps that have no capture stream of their own
+    # (e.g. Minecraft without a PID). Prefer the one that already plays that role.
     sticky = sorted(
         {l.in_node for l in inbound
          if l.out_node in selected_ids
@@ -603,7 +627,7 @@ def plan_apply(graph: Graph, group: list[Node], selected_keys: Iterable[str], cf
     for s in streams:
         outs = s.out_ports_audio
         if not outs:
-            plan.notes.append(f"{app_key(s)} (#{s.id}) nie ma jeszcze portów wyjściowych")
+            plan.notes.append(_("{app} (#{id}) has no output ports yet").format(app=app_key(s), id=s.id))
             continue
         own_caps = [c for c in group if own[c.id] == s.serial]
         if own_caps:
@@ -617,7 +641,7 @@ def plan_apply(graph: Graph, group: list[Node], selected_keys: Iterable[str], cf
                     carrier = sorted(group, key=rank)[0]
                 dest = carrier
         if not dest.in_ports:
-            plan.notes.append(f"strumień przechwytujący #{dest.id} nie ma jeszcze portów wejściowych")
+            plan.notes.append(_("capture stream #{id} has no input ports yet").format(id=dest.id))
             continue
         plan.routes.append((s.id, dest.id))
         for pair in channel_pairs(outs, dest.in_ports):
@@ -637,11 +661,11 @@ def plan_apply(graph: Graph, group: list[Node], selected_keys: Iterable[str], cf
 
 
 # --------------------------------------------------------------------------
-# Migawka i przywracanie
+# Snapshot and restore
 # --------------------------------------------------------------------------
 
 def link_entry(graph: Graph, link: Link, deleted: bool = False) -> dict | None:
-    """Wpis migawki dla połączenia (bez media.name)."""
+    """Snapshot entry for a link (no media.name)."""
     op = graph.ports.get(link.out_port)
     ip = graph.ports.get(link.in_port)
     if op is None or ip is None:
@@ -662,10 +686,10 @@ def link_entry(graph: Graph, link: Link, deleted: bool = False) -> dict | None:
 
 
 def _snapshot_captures(graph: Graph, snapshot: dict):
-    """(węzeł przechwytujący, lista wpisów) — tylko dla węzłów, które nadal istnieją,
-    są strumieniem nagrywania i mają tę samą nazwę co w migawce. Migawka z innego
-    uruchomienia PipeWire (inne cookie demona) jest w całości pomijana: serial to
-    licznik demona i po restarcie wskazuje zupełnie inne obiekty."""
+    """(capture node, entries) — only for nodes that still exist, are recording
+    streams and have the same name as in the snapshot. A snapshot from another
+    PipeWire session (different daemon cookie) is skipped entirely: serial is a
+    daemon counter and after a restart points at completely different objects."""
     if not isinstance(snapshot, dict) or snapshot.get("pw_instance") != graph.instance_id:
         return
     caps = snapshot.get("captures")
@@ -686,9 +710,9 @@ def _snapshot_captures(graph: Graph, snapshot: dict):
 
 
 def _entry_ports(graph: Graph, cap: Node, e: dict) -> tuple[Port, Port] | None:
-    """Porty wpisu migawki w bieżącym grafie — tylko gdy WSZYSTKO się zgadza:
-    serial i nazwy portów, serial i nazwa węzła źródłowego, a wejście należy do
-    tego samego węzła przechwytującego."""
+    """Ports of a snapshot entry in the current graph — only when EVERYTHING matches:
+    port serials and names, source node serial and name, and the input belongs
+    to the same capture node."""
     op = graph.port_by_serial.get(_as_int(e.get("out_port_serial")))
     ip = graph.port_by_serial.get(_as_int(e.get("in_port_serial")))
     if op is None or ip is None or op.direction != "out" or ip.direction != "in":
@@ -707,7 +731,7 @@ def _entry_ports(graph: Graph, cap: Node, e: dict) -> tuple[Port, Port] | None:
 
 
 def snapshot_originals(graph: Graph, snapshot: dict) -> set[tuple[int, int]]:
-    """Pary serial-i portów połączeń z migawki (oryginały sprzed naszych zmian)."""
+    """Port serial pairs of snapshot links (the originals from before our changes)."""
     out = set()
     for cap, entries in _snapshot_captures(graph, snapshot):
         for e in entries:
@@ -718,17 +742,17 @@ def snapshot_originals(graph: Graph, snapshot: dict) -> set[tuple[int, int]]:
 
 
 def plan_restore(graph: Graph, snapshot: dict) -> Plan:
-    """Przywrócenie: usuń nasze (oznaczone) połączenia, odtwórz te, które usunęliśmy.
+    """Restore: remove our (marked) links, recreate the ones we removed.
 
-    Kolejność operacji ma znaczenie (wykonywać w kolejności plan.ops): najpierw
-    odtworzenie brakujących połączeń, potem zamiana oznaczonych kopii oryginałów
-    na nieoznaczone (rozłącz + połącz), na końcu usunięcie reszty naszych połączeń.
+    The order matters (execute in plan.ops order): first recreate missing links,
+    then replace marked copies of originals with unmarked ones (unlink + link),
+    finally remove the rest of our links.
     """
     plan = Plan()
     restorable: set[tuple[int, int]] = set()
     caps = snapshot.get("captures") if isinstance(snapshot, dict) else None
     if caps and snapshot.get("pw_instance") != graph.instance_id:
-        plan.notes.append("migawka pochodzi z innego uruchomienia PipeWire — nie odtwarzam z niej połączeń")
+        plan.notes.append(_("the snapshot is from a different PipeWire session — not restoring links from it"))
     for cap, entries in _snapshot_captures(graph, snapshot):
         for e in entries:
             if e.get("deleted") is not True:
@@ -745,8 +769,8 @@ def plan_restore(graph: Graph, snapshot: dict) -> Plan:
         elif l.managed:
             replace.append(l)
     for l in replace:
-        # Oznaczone połączenie = oryginał. Gdyby zostało oznaczone, następne
-        # przywrócenie (z pustą migawką) by je skasowało — zamieniamy na nieoznaczone.
+        # A marked link that is an original. If it stayed marked, the next restore
+        # (with an empty snapshot) would delete it — replace it with an unmarked one.
         plan.ops.append(_unlink_op(graph, l))
         plan.ops.append(_link_op(graph, (l.out_port, l.in_port), managed=False, original=True))
     for l in sorted(graph.links.values(), key=lambda l: l.id):

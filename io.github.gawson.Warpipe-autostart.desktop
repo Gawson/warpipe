@@ -1,9 +1,11 @@
 [Desktop Entry]
 Type=Application
 Name=Warpipe
-Comment=Do streamu w Discordzie trafia tylko dźwięk wybranych aplikacji
+Name[pl]=Warpipe
+Comment=Choose which apps are heard in your Discord Go Live stream
+Comment[pl]=Do streamu w Discordzie trafia tylko dźwięk wybranych aplikacji
 Exec=warpipe --tray
-Icon=audio-volume-high
+Icon=io.github.gawson.Warpipe
 Terminal=false
 X-GNOME-Autostart-enabled=true
 X-KDE-autostart-after=panel

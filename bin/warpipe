@@ -1,12 +1,17 @@
 #!/usr/bin/python3
-# Warpipe — uruchamiacz (bez venv, tylko biblioteka standardowa + systemowe PySide6).
-# Działa też przez dowiązanie symboliczne, np. ~/.local/bin/warpipe.
+# Warpipe launcher (no venv: only the standard library + the system PySide6).
+# Also works through a symlink, e.g. ~/.local/bin/warpipe.
 import os
 import sys
 
 _here = os.path.dirname(os.path.realpath(__file__))
-if _here not in sys.path:
-    sys.path.insert(0, _here)
+# Installed: the package sits next to the launcher (<appdir>/warpipe);
+# in a checkout the launcher is bin/warpipe and the package is ../warpipe.
+for _dir in (_here, os.path.dirname(_here)):
+    if os.path.isfile(os.path.join(_dir, "warpipe", "__init__.py")):
+        if _dir not in sys.path:
+            sys.path.insert(0, _dir)
+        break
 
 from warpipe.cli import main  # noqa: E402
 

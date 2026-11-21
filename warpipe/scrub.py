@@ -1,10 +1,11 @@
-"""Zrzut diagnostyczny pw-dump bez prywatnych danych.
+"""Diagnostic pw-dump without private data.
 
-Usuwamy: media.name i inne opisy treści (tytuły kart, utworów), dane hosta,
-użytkownika i procesu (także user-name/host-name obiektu Core i core.name,
-który ma postać pipewire-<użytkownik>-<pid>). Zostawiamy strukturę grafu, klasy, nazwy węzłów i portów
-oraz to, CZY dana właściwość istniała (np. application.process.id) — to ważne
-przy diagnozie, bo Discord pomija strumienie bez PID.
+Removed: media.name and other content descriptions (tab and track titles), host,
+user and process data (including user-name/host-name of the Core object and
+core.name, which looks like pipewire-<user>-<pid>). Kept: the graph structure,
+classes, node and port names, and WHETHER a property existed (e.g.
+application.process.id) — this matters for diagnosis, since Discord skips
+streams without a PID.
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ MEDIA_KEYS = {
     "media.name", "media.title", "media.artist", "media.album", "media.filename",
     "media.copyright", "media.software", "media.comment", "media.genre",
     "media.date", "media.icon_name", "media.icon", "media.language",
-    "node.description",  # dla strumieni bywa tytułem
+    "node.description",  # for streams it is often a title
 }
 SCRUB_KEYS = {
     "application.process.host", "application.process.user",
@@ -32,7 +33,7 @@ SCRUB_KEYS = {
     # Core: info.user-name / info.host-name; props core.name = "pipewire-<user>-<pid>"
     "user-name", "host-name", "core.name", "config.name",
 }
-# Dla węzłów urządzeń node.description jest przydatne i niegroźne.
+# For device nodes node.description is useful and harmless.
 _DEVICE_CLASSES_PREFIX = ("Audio/Sink", "Audio/Source", "Video/", "Midi/")
 
 
@@ -47,7 +48,7 @@ def _scrub_props(props: dict, is_device: bool) -> None:
 
 
 def _scrub_any(value: Any) -> Any:
-    """Rekurencyjnie: słowniki (klucze jak wyżej) i płaskie listy klucz/wartość (Tag.info)."""
+    """Recursively: dicts (keys as above) and flat key/value lists (Tag.info)."""
     if isinstance(value, dict):
         for k, v in list(value.items()):
             if k in MEDIA_KEYS and k != "node.description":

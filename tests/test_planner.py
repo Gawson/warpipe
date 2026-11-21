@@ -1,3 +1,5 @@
+"""Link planning: channel matching, carrier nodes, restore plans, stale snapshots."""
+
 import unittest
 
 from helpers import FakePw, GraphBuilder
@@ -313,7 +315,7 @@ class TestRestoreStaleSnapshot(unittest.TestCase):
         self.assertEqual(gr2.port_by_serial[e["out_port_serial"]].node_id, 59)
         rplan = plan_restore(gr2, snap)
         self.assertEqual(rplan.links, [])
-        self.assertTrue(any("innego uruchomienia" in n for n in rplan.notes))
+        self.assertTrue(any("different PipeWire session" in n for n in rplan.notes))
         self.assertEqual(snapshot_originals(gr2, snap), set())
 
     def test_strict_validation_even_without_instance_id(self):

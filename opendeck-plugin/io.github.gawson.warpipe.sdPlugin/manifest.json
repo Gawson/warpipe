@@ -1,6 +1,6 @@
 {
   "Name": "Warpipe",
-  "Description": "Przyciski do streamu w Discordzie (Go Live): dźwięk wybranej aplikacji do streamu albo cały system. Wymaga programu „Warpipe” (warpipe).",
+  "Description": "Keys for your Discord Go Live stream: put a chosen app's audio on stream, or the whole system. Requires the Warpipe program (warpipe).",
   "Author": "warpipe",
   "Version": "1.0.0",
   "SDKVersion": 2,
@@ -23,9 +23,9 @@
   "Actions": [
     {
       "UUID": "io.github.gawson.warpipe.app",
-      "Name": "Dźwięk z aplikacji",
+      "Name": "App audio",
       "Icon": "icons/action-app",
-      "Tooltip": "Dodaje albo zabiera dźwięk wybranej aplikacji (np. gry) ze streamu w Discordzie",
+      "Tooltip": "Adds or removes the selected app's audio (e.g. a game) to/from your Discord Go Live stream",
       "Controllers": ["Keypad"],
       "SupportedInMultiActions": false,
       "PropertyInspectorPath": "pi/app.html",
@@ -37,9 +37,9 @@
     },
     {
       "UUID": "io.github.gawson.warpipe.system",
-      "Name": "Cały system",
+      "Name": "Whole system",
       "Icon": "icons/action-system",
-      "Tooltip": "Do streamu w Discordzie idzie cały dźwięk komputera (zwykłe zachowanie Discorda)",
+      "Tooltip": "Your Discord stream gets all system audio (Discord's normal behaviour)",
       "Controllers": ["Keypad"],
       "SupportedInMultiActions": false,
       "States": [

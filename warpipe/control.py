@@ -1,39 +1,42 @@
-"""Kanał sterowania działającą instancją (ikona albo --watch).
+"""Control channel of the running instance (tray icon or --watch).
 
-Gniazdo Unix: $XDG_RUNTIME_DIR/warpipe/control.sock (katalog 0700, gniazdo 0600,
-dodatkowo sprawdzamy UID drugiej strony). Korzystają z niego wtyczka OpenDeck oraz
+Unix socket: $XDG_RUNTIME_DIR/warpipe/control.sock (directory 0700, socket 0600,
+and the peer UID is checked too). Used by the OpenDeck plugin and by
 `warpipe --status/--toggle/--system`.
 
-Jedynym właścicielem zmian połączeń pozostaje Enforcer działającej instancji. Przez
-gniazdo można tylko poprosić o zmianę wyboru (dokładnie te same metody co menu
-ikony). Nic z gniazda nie jest uruchamiane ani interpretowane jako polecenie systemowe.
+The running instance's Enforcer stays the only owner of link changes. Through the
+socket a client can only ask for a selection change (exactly the same methods as
+the tray menu). Nothing from the socket is executed or interpreted as a system
+command.
 
-Protokół: UTF-8, jedna wiadomość JSON w jednej linii (maks. 4096 bajtów).
+Protocol: UTF-8, one JSON message per line (max 4096 bytes).
 
   → {"cmd": "status"}
   → {"cmd": "toggle", "app": "Warframe.x64.exe"}
   → {"cmd": "set", "app": "Warframe.x64.exe", "on": true}
-  → {"cmd": "system"}                      („Cały system”: wyłącz pilnowanie i przywróć)
-  → {"cmd": "subscribe"}                   (potem serwer sam przysyła stan po każdej zmianie)
-  Opcjonalne "id" (liczba albo krótki tekst) wraca w odpowiedzi.
+  → {"cmd": "system"}                      ("Whole system": disable enforcement and restore)
+  → {"cmd": "subscribe"}                   (then the server pushes the state after every change)
+  An optional "id" (number or short string) is echoed in the reply.
 
   ← {"type": "reply", "id": …, "ok": true, "message": "…", "status": {…}}
   ← {"type": "reply", "id": …, "ok": false, "error": "…"}
-  ← {"type": "status", "status": {…}}      (tylko po subscribe)
+  ← {"type": "status", "status": {…}}      (only after subscribe)
 
-Stan:
+  "message" and "error" are human-readable, in the instance's UI language.
+
+State:
   {"version": 1, "tool": "1.1.0", "enforce": bool,
    "capture": {"status": "active"|"none"|"ambiguous", "count": int},
    "apps": [{"key", "display", "present", "selected", "in_stream"}],
-   "error": "…"}                            (error tylko gdy jest błąd)
+   "error": "…"}                            (error only when there is one)
 
-  selected  — aplikacja jest w zapisanym wyborze (działa tylko przy "enforce": true);
-  in_stream — wyjście aplikacji JEST teraz połączone z dźwiękiem streamu (stan grafu).
+  selected  — the app is in the saved selection (only effective with "enforce": true);
+  in_stream — the app's output IS linked to the stream audio right now (graph state).
 
-Wątki: jeden przyjmuje połączenia, każdy klient ma swój wątek, osobny wątek rozsyła
-stan subskrybentom (z krótkim debounce). Z Enforcerem rozmawiamy tylko przez jego
-metody (RLock); w trybie ikony stan do GUI idzie dalej sygnałem Qt, więc żaden
-z tych wątków nie dotyka obiektów Qt.
+Threads: one accepts connections, each client has its own thread, and a separate
+thread pushes the state to subscribers (with a short debounce). The Enforcer is
+only used through its methods (RLock); in tray mode the state reaches the GUI via
+a Qt signal, so none of these threads touches Qt objects.
 """
 
 from __future__ import annotations
@@ -51,6 +54,7 @@ import time
 from pathlib import Path
 
 from . import __version__
+from .i18n import _
 from .planner import STATUS_AMBIGUOUS, STATUS_FOUND, STATUS_INVALID
 from .state import runtime_dir
 
@@ -73,11 +77,11 @@ COMMANDS = ("status", "toggle", "set", "system", "subscribe")
 
 
 class ControlError(Exception):
-    """Błąd kanału sterowania (komunikat po polsku)."""
+    """Control channel error (the message is user-facing, translated)."""
 
 
 class NotRunning(ControlError):
-    """Nie działa żadna instancja z kanałem sterowania."""
+    """No instance with a control channel is running."""
 
 
 class ProtocolError(ValueError):
@@ -91,7 +95,7 @@ def socket_path() -> Path:
 
 
 # --------------------------------------------------------------------------
-# Stan → JSON
+# State → JSON
 # --------------------------------------------------------------------------
 
 def capture_state(st) -> tuple[str, int]:
@@ -106,7 +110,7 @@ def capture_state(st) -> tuple[str, int]:
 
 
 def status_to_dict(st) -> dict:
-    """Stan dla klientów kanału. Bez media.name (tytułów) — tylko klucze aplikacji."""
+    """State for channel clients. No media.name (titles) — only app keys."""
     cap, count = capture_state(st)
     selected_cf = {k.casefold() for k in st.selected}
     in_cf = {k.casefold() for k in getattr(st, "in_stream", [])}
@@ -135,19 +139,20 @@ def status_to_dict(st) -> dict:
 
 
 # --------------------------------------------------------------------------
-# Parsowanie żądań
+# Request parsing
 # --------------------------------------------------------------------------
 
 def _clean_text(value, what: str, limit: int, rid=None) -> str:
     if not isinstance(value, str):
-        raise ProtocolError(f"pole {what} musi być tekstem", rid)
+        raise ProtocolError(_("field {field} must be a string").format(field=what), rid)
     v = value.strip()
     if not v:
-        raise ProtocolError(f"puste pole {what}", rid)
+        raise ProtocolError(_("field {field} is empty").format(field=what), rid)
     if len(v) > limit:
-        raise ProtocolError(f"pole {what} jest za długie (maks. {limit} znaków)", rid)
+        raise ProtocolError(_("field {field} is too long (max {limit} characters)").format(field=what, limit=limit),
+                            rid)
     if any(ord(ch) < 32 or ord(ch) == 127 for ch in v):
-        raise ProtocolError(f"pole {what} zawiera znaki sterujące", rid)
+        raise ProtocolError(_("field {field} contains control characters").format(field=what), rid)
     return v
 
 
@@ -156,35 +161,36 @@ def _parse_on(value, rid) -> bool:
         return value
     if isinstance(value, str) and value.strip().lower() in ("on", "off"):
         return value.strip().lower() == "on"
-    raise ProtocolError("pole on musi być true/false albo \"on\"/\"off\"", rid)
+    raise ProtocolError(_("field on must be true/false or \"on\"/\"off\""), rid)
 
 
 def parse_request(line) -> dict:
-    """Jedna linia → {"cmd", "id", ...}. Błędy: ProtocolError (z id, jeśli dało się je odczytać)."""
+    """One line → {"cmd", "id", ...}. Errors: ProtocolError (with the id, if it could be read)."""
     if isinstance(line, str):
         line = line.encode("utf-8", "surrogatepass")
     if len(line) > MAX_LINE:
-        raise ProtocolError(f"za długa linia (maks. {MAX_LINE} bajtów)")
+        raise ProtocolError(_("line too long (max {limit} bytes)").format(limit=MAX_LINE))
     try:
         text = line.decode("utf-8")
     except UnicodeDecodeError:
-        raise ProtocolError("niepoprawne kodowanie (oczekiwane UTF-8)") from None
+        raise ProtocolError(_("invalid encoding (UTF-8 expected)")) from None
     try:
         obj = json.loads(text)
     except ValueError:
-        raise ProtocolError("niepoprawny JSON") from None
+        raise ProtocolError(_("invalid JSON")) from None
     if not isinstance(obj, dict):
-        raise ProtocolError("oczekiwany obiekt JSON")
+        raise ProtocolError(_("JSON object expected"))
     rid = obj.get("id")
     if not ((isinstance(rid, int) and not isinstance(rid, bool))
             or (isinstance(rid, str) and len(rid) <= MAX_ID_LEN)):
         rid = None
     cmd = obj.get("cmd")
     if not isinstance(cmd, str) or not cmd:
-        raise ProtocolError("brak pola cmd", rid)
+        raise ProtocolError(_("missing field cmd"), rid)
     if cmd not in COMMANDS:
         shown = cmd if len(cmd) <= 40 else cmd[:40] + "…"
-        raise ProtocolError(f"nieznane polecenie: {shown!r} (znane: {', '.join(COMMANDS)})", rid)
+        raise ProtocolError(_("unknown command: {cmd} (known: {known})")
+                            .format(cmd=repr(shown), known=", ".join(COMMANDS)), rid)
     req = {"cmd": cmd, "id": rid}
     if cmd in ("toggle", "set"):
         req["app"] = _clean_text(obj.get("app"), "app", MAX_APP_LEN, rid)
@@ -194,7 +200,7 @@ def parse_request(line) -> dict:
 
 
 # --------------------------------------------------------------------------
-# Obsługa poleceń (bez gniazd — testowalne bezpośrednio)
+# Command handling (no sockets — directly testable)
 # --------------------------------------------------------------------------
 
 class ControlHandler:
@@ -223,8 +229,8 @@ class ControlHandler:
             return self._reply(st, msg)
         if cmd == "system":
             st = self.enforcer.set_enabled(False)
-            return self._reply(st, "Do Discorda idzie cały dźwięk systemu.")
-        return {"type": "reply", "ok": False, "error": f"nieznane polecenie: {cmd!r}"}
+            return self._reply(st, _("All system audio goes to Discord."))
+        return {"type": "reply", "ok": False, "error": _("unknown command: {cmd}").format(cmd=repr(cmd))}
 
 
 def _dumps(obj) -> bytes:
@@ -232,16 +238,16 @@ def _dumps(obj) -> bytes:
 
 
 # --------------------------------------------------------------------------
-# Serwer
+# Server
 # --------------------------------------------------------------------------
 
 def _ensure_private_dir(d: Path) -> None:
     d.mkdir(parents=True, exist_ok=True, mode=0o700)
     st = os.lstat(d)
     if not stat.S_ISDIR(st.st_mode):
-        raise ControlError(f"{d} nie jest katalogiem")
+        raise ControlError(_("{path} is not a directory").format(path=d))
     if st.st_uid != os.getuid():
-        raise ControlError(f"katalog {d} należy do innego użytkownika")
+        raise ControlError(_("directory {path} belongs to another user").format(path=d))
     if st.st_mode & 0o077:
         os.chmod(d, 0o700)
 
@@ -265,33 +271,33 @@ def _set_send_timeout(conn: socket.socket, seconds: float) -> None:
 
 
 def remove_stale_socket(path: Path) -> bool:
-    """Usuwa gniazdo po instancji, która padła (np. kill -9). Zwraca True, jeśli usunięto.
+    """Remove the socket left by an instance that died (e.g. kill -9). Returns True if removed.
 
-    Wołać dopiero PO zdobyciu blokady instancji. Jeśli ktoś jednak nasłuchuje — błąd."""
+    Call only AFTER acquiring the instance lock. If something is listening after all — error."""
     try:
         st = os.lstat(path)
     except FileNotFoundError:
         return False
     if not stat.S_ISSOCK(st.st_mode):
-        raise ControlError(f"{path} istnieje i nie jest gniazdem — nie ruszam go")
+        raise ControlError(_("{path} exists and is not a socket — leaving it alone").format(path=path))
     if st.st_uid != os.getuid():
-        raise ControlError(f"gniazdo {path} należy do innego użytkownika")
+        raise ControlError(_("socket {path} belongs to another user").format(path=path))
     probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     probe.settimeout(0.5)
     try:
         probe.connect(str(path))
     except OSError as e:
         if e.errno not in (errno.ECONNREFUSED, errno.ENOENT):
-            raise ControlError(f"nie mogę sprawdzić gniazda {path}: {e}") from e
+            raise ControlError(_("can't check socket {path}: {error}").format(path=path, error=e)) from e
     else:
-        raise ControlError(f"na {path} już ktoś nasłuchuje")
+        raise ControlError(_("something is already listening on {path}").format(path=path))
     finally:
         probe.close()
     try:
         os.unlink(path)
     except FileNotFoundError:
         pass
-    log.info("usunięto stare gniazdo sterowania (poprzednia instancja nie posprzątała)")
+    log.info("removed a stale control socket (the previous instance did not clean up)")
     return True
 
 
@@ -360,7 +366,7 @@ class ControlServer:
             st = os.stat(self.path)
         except OSError as e:
             s.close()
-            raise ControlError(f"nie mogę utworzyć gniazda {self.path}: {e}") from e
+            raise ControlError(_("can't create socket {path}: {error}").format(path=self.path, error=e)) from e
         self._ident = (st.st_dev, st.st_ino)
         self._sock = s
         self._wake_r, self._wake_w = os.pipe()
@@ -370,7 +376,7 @@ class ControlServer:
             t = threading.Thread(target=target, name=f"warpipe-control-{name}", daemon=True)
             t.start()
             self._threads.append(t)
-        log.info("kanał sterowania: %s", self.path)
+        log.info("control channel: %s", self.path)
         return self
 
     def stop(self) -> None:
@@ -395,7 +401,7 @@ class ControlServer:
         except OSError:
             pass
         self._sock = None
-        # Usuwamy tylko NASZE gniazdo (to samo i-węzło), nie cudze o tej samej nazwie.
+        # Remove only OUR socket (same inode), not someone else's with the same name.
         try:
             st = os.lstat(self.path)
             if (st.st_dev, st.st_ino) == self._ident:
@@ -410,7 +416,7 @@ class ControlServer:
         self._wake_r = self._wake_w = -1
 
     def notify(self, *_args) -> None:
-        """Stan się zmienił (wołane z dowolnego wątku; nie blokuje)."""
+        """The state changed (called from any thread; does not block)."""
         self._dirty.set()
 
     @property
@@ -418,7 +424,7 @@ class ControlServer:
         with self._clients_lock:
             return len(self._clients)
 
-    # ------------------------------------------------------------- wątki
+    # ------------------------------------------------------------- threads
     def _accept_loop(self) -> None:
         sel = selectors.DefaultSelector()
         sel.register(self._sock, selectors.EVENT_READ, "sock")
@@ -445,7 +451,7 @@ class ControlServer:
         conn.setblocking(True)
         uid = _peer_uid(conn)
         if uid is not None and uid != os.getuid():
-            log.warning("kanał sterowania: odrzucam połączenie od UID %s", uid)
+            log.warning("control channel: rejecting a connection from UID %s", uid)
             conn.close()
             return
         _set_send_timeout(conn, SEND_TIMEOUT)
@@ -455,7 +461,7 @@ class ControlServer:
             if not too_many:
                 self._clients.add(client)
         if too_many:
-            client.send({"type": "reply", "ok": False, "error": "za dużo połączeń"})
+            client.send({"type": "reply", "ok": False, "error": _("too many connections")})
             conn.close()
             return
         t = threading.Thread(target=self._client_loop, args=(client,),
@@ -481,7 +487,8 @@ class ControlServer:
                         self._handle_line(client, line)
                 if len(buf) > MAX_LINE:
                     client.send({"type": "reply", "ok": False,
-                                 "error": f"za długa linia (maks. {MAX_LINE} bajtów) — rozłączam"})
+                                 "error": _("line too long (max {limit} bytes) — disconnecting")
+                                 .format(limit=MAX_LINE)})
                     break
         finally:
             with self._clients_lock:
@@ -501,8 +508,8 @@ class ControlServer:
             client.send(reply)
             return
         if req["cmd"] == "subscribe":
-            # Pod blokadą rozsyłania: odpowiedź (ze stanem) nie może się wyprzedzić
-            # ze starszym stanem rozsyłanym właśnie przez wątek powiadomień.
+            # Under the push lock: the reply (with the state) must not race with an
+            # older state being pushed right now by the notify thread.
             with self._push_lock:
                 status = self.handler.status()
                 reply = {"type": "reply", "ok": True, "status": status}
@@ -516,13 +523,13 @@ class ControlServer:
         try:
             reply = self.handler.handle(req)
         except Exception:
-            log.exception("kanał sterowania: błąd podczas %s", req["cmd"])
-            reply = {"type": "reply", "ok": False, "error": "błąd wewnętrzny (szczegóły w logu)"}
+            log.exception("control channel: error during %s", req["cmd"])
+            reply = {"type": "reply", "ok": False, "error": _("internal error (see the log)")}
         if req["id"] is not None:
             reply["id"] = req["id"]
         client.send(reply)
         if req["cmd"] != "status":
-            log.info("kanał sterowania: %s %s → %s", req["cmd"], req.get("app", ""),
+            log.info("control channel: %s %s → %s", req["cmd"], req.get("app", ""),
                      reply.get("message") or reply.get("error") or "")
 
     def _notify_loop(self) -> None:
@@ -548,7 +555,7 @@ class ControlServer:
             try:
                 status = self.handler.status()
             except Exception:  # pragma: no cover
-                log.exception("kanał sterowania: stan")
+                log.exception("control channel: status")
                 return
             data = _dumps(status)
             msg = _dumps({"type": "status", "status": status})
@@ -562,25 +569,25 @@ class ControlServer:
 
 
 def start_control_server(enforcer, path: Path | None = None) -> ControlServer | None:
-    """Uruchamia kanał sterowania dla działającej instancji. Wołać PO zdobyciu blokady.
+    """Start the control channel of the running instance. Call AFTER acquiring the lock.
 
-    Błąd (np. za długa ścieżka gniazda) nie blokuje narzędzia — tylko ostrzeżenie."""
+    An error (e.g. a socket path that is too long) does not stop the tool — just a warning."""
     srv = ControlServer(ControlHandler(enforcer), path)
     try:
         srv.start()
     except (OSError, ControlError) as e:
-        log.warning("kanał sterowania niedostępny (wtyczka OpenDeck i --toggle nie zadziałają): %s", e)
+        log.warning("control channel unavailable (the OpenDeck plugin and --toggle won't work): %s", e)
         return None
     enforcer.add_status_listener(srv.notify)
     return srv
 
 
 # --------------------------------------------------------------------------
-# Klient (CLI)
+# Client (CLI)
 # --------------------------------------------------------------------------
 
 def request(req: dict, path: Path | None = None, timeout: float = 30.0) -> dict:
-    """Wysyła jedno polecenie do działającej instancji i zwraca odpowiedź."""
+    """Send one command to the running instance and return the reply."""
     p = Path(path) if path is not None else socket_path()
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     s.settimeout(timeout)
@@ -589,27 +596,27 @@ def request(req: dict, path: Path | None = None, timeout: float = 30.0) -> dict:
             s.connect(str(p))
         except OSError as e:
             if e.errno in (errno.ENOENT, errno.ECONNREFUSED, errno.ENOTSOCK, errno.ENOTDIR):
-                raise NotRunning("Warpipe nie jest uruchomiony (ani ikona, ani --watch).") from e
-            raise ControlError(f"Nie mogę połączyć się z {p}: {e}") from e
+                raise NotRunning(_("Warpipe is not running (neither the tray icon nor --watch).")) from e
+            raise ControlError(_("Can't connect to {path}: {error}").format(path=p, error=e)) from e
         s.sendall(_dumps(req))
         buf = b""
         while b"\n" not in buf:
             try:
                 data = s.recv(65536)
             except socket.timeout as e:
-                raise ControlError("Działająca instancja nie odpowiedziała na czas.") from e
+                raise ControlError(_("The running instance did not answer in time.")) from e
             if not data:
-                raise ControlError("Działająca instancja zamknęła połączenie bez odpowiedzi.")
+                raise ControlError(_("The running instance closed the connection without answering."))
             buf += data
             if len(buf) > 4 * 1024 * 1024:
-                raise ControlError("Za długa odpowiedź.")
+                raise ControlError(_("Reply too long."))
         line = buf.split(b"\n", 1)[0]
         try:
             obj = json.loads(line.decode("utf-8"))
         except ValueError as e:
-            raise ControlError("Niepoprawna odpowiedź działającej instancji.") from e
+            raise ControlError(_("Invalid reply from the running instance.")) from e
         if not isinstance(obj, dict):
-            raise ControlError("Niepoprawna odpowiedź działającej instancji.")
+            raise ControlError(_("Invalid reply from the running instance."))
         return obj
     finally:
         s.close()

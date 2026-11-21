@@ -1,3 +1,5 @@
+"""Enforcer: apply/restore cycles, snapshots, loop protection, privacy of logs."""
+
 import json
 import logging
 import os
@@ -104,7 +106,7 @@ class TestApplyRestore(Base):
         st = enf.refresh()
         self.assertEqual(self.fake.mutations, [])
         self.assertEqual(st.capture_status, "found")
-        self.assertEqual(st.routing_text(), "Do Discorda: cały dźwięk systemu")
+        self.assertEqual(st.routing_text(), "To Discord: all system audio")
 
 
 class TestDynamics(Base):
@@ -365,7 +367,7 @@ class TestReselectAndRestoreCycles(Base):
         self.assertTrue(ok)
         self.assertEqual(self.fake.mutations, [])
         self.assertEqual(b.all_link_pairs(), before)
-        self.assertEqual(msg, "przywrócono 0, usunięto 0")
+        self.assertEqual(msg, "restored 0, removed 0")
 
     def test_multi_app_reselect_sequence(self):
         """Sekwencja z testu na żywo: apply browser; apply java; apply game+browser+java; restore×2."""

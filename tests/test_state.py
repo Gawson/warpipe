@@ -1,4 +1,4 @@
-"""Konfiguracja i migawka: odporność na uszkodzone pliki, wiązanie z uruchomieniem PipeWire."""
+"""Config and snapshot: robustness against broken files, binding to the PipeWire session."""
 
 import json
 import tempfile

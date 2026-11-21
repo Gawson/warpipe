@@ -1,15 +1,15 @@
-"""Rysowanie przycisków: QImage + QPainter → PNG → data URL dla setImage.
+"""Key rendering: QImage + QPainter -> PNG -> data URL for setImage.
 
-OpenDeck rysuje obrazek przycisku na kanwie 144×144 (i dopiero potem zmniejsza do
-72×72 dla Stream Decka V2), przyjmuje data URL PNG/SVG. PNG działa wszędzie
-(również w oprogramowaniu Elgato), więc rysujemy PNG 144×144.
+OpenDeck draws the key image on a 144x144 canvas (and only then scales it down
+to 72x72 for a Stream Deck V2); it accepts PNG/SVG data URLs. PNG works
+everywhere (also in the Elgato software), so we draw a 144x144 PNG.
 
-Proste rysowane symbole (głośnik, „!”, „?”, słupki) — bez cudzych logo.
+Simple drawn symbols (speaker, "!", "?", bars) — no third-party logos.
 
-W PNG zapisujemy też krótkie metadane (tEXt/iTXt): ddstate, ddlabel, ddbadge,
-ddring — testy i podgląd sprawdzają po nich, który stan został narysowany.
+The PNG also carries short metadata (tEXt/iTXt): ddstate, ddlabel, ddbadge,
+ddring — tests and the preview use them to check which state was drawn.
 
-Wymaga istniejącej QGuiApplication (czcionki) — wtyczka tworzy ją z -platform offscreen.
+Needs an existing QGuiApplication (fonts) — the plugin creates one with -platform offscreen.
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ from .logic import (S_ABSENT, S_DOWN, S_ERROR, S_NOSTREAM, S_OFF, S_ON,
 
 SIZE = 144
 
-# tło (góra, dół), symbol, podpis, plakietka (tło, napis)
+# background (top, bottom), symbol, caption, badge (background, text)
 STYLE = {
     S_ON:       ("#22a356", "#13753a", "#ffffff", "#ffffff", "#0a3d1d", "#d7ffe4"),
     S_SYS_ON:   ("#22a356", "#13753a", "#ffffff", "#ffffff", "#0a3d1d", "#d7ffe4"),
@@ -52,7 +52,7 @@ def _font(px: float, bold: bool = False) -> QFont:
 
 
 # --------------------------------------------------------------------------
-# Symbole (współrzędne w pikselach obrazka; s = skala względem 144)
+# Symbols (coordinates in image pixels; s = scale relative to 144)
 # --------------------------------------------------------------------------
 
 def _speaker(p: QPainter, cx: float, cy: float, s: float, color: QColor, waves: int, slash: bool) -> None:
@@ -133,7 +133,7 @@ def _glyph(p: QPainter, v: Visual, cx: float, cy: float, s: float, color: QColor
 
 
 # --------------------------------------------------------------------------
-# Napisy
+# Text
 # --------------------------------------------------------------------------
 
 def _fit_label(p: QPainter, text: str, rect: QRectF, color: QColor, max_px: float, min_px: float) -> None:
@@ -153,7 +153,7 @@ def _fit_label(p: QPainter, text: str, rect: QRectF, color: QColor, max_px: floa
                 p.drawText(rect, flags, text)
                 return
         px -= 1
-    # nic nie pasuje: najmniejsza czcionka, dwie linie z wielokropkiem
+    # nothing fits: smallest font, two lines with an ellipsis
     f = _font(min_px, bold=True)
     fm = QFontMetricsF(f)
     shown = fm.elidedText(text, Qt.TextElideMode.ElideRight, rect.width() * 1.9)
@@ -222,7 +222,7 @@ def render(v: Visual, size: int = SIZE) -> QImage:
 
 
 def render_icon(kind: str, size: int, color: str = "#ffffff", background: str | None = None) -> QImage:
-    """Ikona akcji/kategorii/wtyczki: sam symbol (przezroczyste tło albo kolor)."""
+    """Action/category/plugin icon: just the symbol (transparent or coloured background)."""
     s = size / SIZE * 1.9
     img = QImage(size, size, QImage.Format.Format_ARGB32)
     img.fill(QColor(0, 0, 0, 0))
@@ -250,7 +250,7 @@ def to_png(img: QImage) -> bytes:
     ok = img.save(buf, "PNG")
     buf.close()
     if not ok:
-        raise RuntimeError("nie udało się zapisać PNG")
+        raise RuntimeError("failed to encode PNG")
     return bytes(ba)
 
 
@@ -259,7 +259,7 @@ def data_url(png: bytes) -> str:
 
 
 class Renderer:
-    """Pamięć podręczna: ten sam wygląd → ten sam obrazek (bez ponownego rysowania)."""
+    """Cache: the same Visual -> the same image (no redraw)."""
 
     def __init__(self, size: int = SIZE, limit: int = 256) -> None:
         self.size = size

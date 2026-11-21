@@ -1,3 +1,5 @@
+"""CLI: --list/--apply/--restore/--dump against a fake PipeWire; scrubbed dumps."""
+
 import contextlib
 import io
 import json
@@ -92,8 +94,8 @@ class TestCli(CliBase):
         b = GraphBuilder(load_fixture())
         rc, out, err = self.run_cli(b, "--list")
         self.assertEqual(rc, 0)
-        self.assertIn("nie wykryty", out)
-        self.assertIn("mikrofon", out)
+        self.assertIn("not detected", out)
+        self.assertIn("microphone", out)
         self.assertEqual(self.fake.mutations, [])
 
     def test_apply_dry_run_changes_nothing(self):
@@ -101,8 +103,8 @@ class TestCli(CliBase):
         before = b.all_link_pairs()
         rc, out, err = self.run_cli(b, "--apply", "firefox", "--dry-run")
         self.assertEqual(rc, 0, err)
-        self.assertIn("połącz", out)
-        self.assertIn("rozłącz", out)
+        self.assertRegex(out, r"(?m)^  link +\S")
+        self.assertRegex(out, r"(?m)^  unlink +\S")
         self.assertEqual(b.all_link_pairs(), before)
         self.assertEqual(self.fake.mutations, [])
 
@@ -143,7 +145,7 @@ class TestCli(CliBase):
         b, ns = per_app()
         rc, out, err = self.run_cli(b, "--apply", "Firefox", "--capture", str(ns.rec.id))
         self.assertEqual(rc, cli.EXIT_NO_CAPTURE)
-        self.assertIn("mikrofon", err)
+        self.assertIn("microphone", err)
         self.assertEqual(self.fake.mutations, [])
 
     def test_dump_scrubbed(self):
@@ -185,7 +187,7 @@ class TestCli(CliBase):
         rc, out, err = self.run_cli(b, "--apply", "Firefox", "warfrme")
         self.assertEqual(rc, 0, err)
         self.assertIn("warfrme", err)
-        self.assertIn("NIE pójdzie do Discorda", err)
+        self.assertIn("will NOT go to Discord", err)
         inbound = {l.out_node for l in Graph.from_dump(b.dump()).links.values() if l.in_node == ns.cap.id}
         self.assertEqual(inbound, {ns.firefox.id})
 
@@ -194,7 +196,7 @@ class TestCli(CliBase):
         (self.dir / "cfg" / "config.json").unlink()   # bez potwierdzeń
         rc, out, err = self.run_cli(b, "--apply", "Firefox")
         self.assertEqual(rc, cli.EXIT_NO_CAPTURE)
-        self.assertIn("mikrofon", err)
+        self.assertIn("microphone", err)
         self.assertEqual(self.fake.mutations, [])
         rc, out, err = self.run_cli(b, "--list")
         self.assertIn(f"--capture {ns.cap.id}", out)
@@ -214,7 +216,7 @@ class TestCli(CliBase):
         (self.dir / "cfg" / "config.json").write_bytes('{"selected_apps": ["Gra Łódź.exe"]}'.encode("iso-8859-2"))
         rc, out, err = self.run_cli(b, "--list")
         self.assertEqual(rc, 0, err)
-        self.assertIn("Uwaga", err)
+        self.assertIn("Warning", err)
         (self.dir / "run").mkdir(parents=True, exist_ok=True)
         for bad in (b'{"captures": {"\xff": {}}}',
                     b'{"captures": {"123": "x", "5": {"links": [1, "a"]}, "7": {"links": "x"}}}',

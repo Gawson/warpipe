@@ -1,3 +1,5 @@
+"""Capture detection on synthetic graphs and real (anonymized) pw-dump snapshots."""
+
 import unittest
 
 from helpers import GraphBuilder, load_fixture
@@ -66,7 +68,7 @@ class TestDetectMonitor(unittest.TestCase):
         det = detect(g(b), CFG_MON)
         self.assertEqual(det.status, STATUS_FOUND)
         self.assertEqual([c.id for c in det.group], [ns.cap.id])
-        self.assertIn("wejście z monitora wyjścia", det.group[0].reasons)
+        self.assertIn("input from an output monitor", det.group[0].reasons)
 
     def test_monitor_links_without_target_props(self):
         b = GraphBuilder()
@@ -86,7 +88,7 @@ class TestDetectMonitor(unittest.TestCase):
             c = next(c for c in det.candidates if c.id == ns.cap.id)
             self.assertEqual(c.kind, KIND_SCREENSHARE)
             self.assertTrue(c.needs_confirm)
-            self.assertIn("mikrofon", det.message)
+            self.assertIn("microphone", det.message)
 
     def test_confirmation_is_per_sink(self):
         """Potwierdzenie dla monitora ALSA nie obejmuje innego wyjścia."""
@@ -183,7 +185,7 @@ class TestDetectMic(unittest.TestCase):
         det = detect(g(b), CFG)
         self.assertEqual(det.status, STATUS_FOUND)
         self.assertTrue(det.group[0].mic_linked)
-        self.assertTrue(any("mikrofon" in w for w in det.warnings))
+        self.assertTrue(any("microphone" in w for w in det.warnings))
         # enforcement usuwa mikrofon z dźwięku streamu
         plan = plan_apply(g(b), det.group_nodes, ["Firefox"], CFG)
         unl = {(o.out_port, o.in_port) for o in plan.unlinks}
@@ -194,7 +196,7 @@ class TestDetectMic(unittest.TestCase):
         ns = with_apps(b, base_system(b))
         b.capture(target=ns.firefox.serial, params={"Props": [{"mute": False, "softMute": True}]})
         det = detect(g(b), CFG)
-        self.assertTrue(any("wyciszone" in w for w in det.warnings))
+        self.assertTrue(any("muted" in w for w in det.warnings))
 
 
 class TestAmbiguous(unittest.TestCase):

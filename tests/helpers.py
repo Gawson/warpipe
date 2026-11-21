@@ -1,4 +1,4 @@
-"""Pomocnicze: budowanie syntetycznych zrzutów pw-dump i atrapa adaptera pw."""
+"""Test helpers: building synthetic pw-dump snapshots and a fake pw adapter."""
 
 from __future__ import annotations
 
@@ -6,6 +6,10 @@ import copy
 import json
 import os
 import sys
+
+# Tests assert the default (English) UI regardless of the developer's locale or
+# config; child processes (CLI, plugin) inherit this too.
+os.environ["WARPIPE_LANG"] = "en"
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:

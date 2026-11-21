@@ -1,18 +1,25 @@
-"""Ikona w zasobniku (PySide6, QSystemTrayIcon — pod Plasma Wayland przez SNI).
+"""System tray icon (PySide6, QSystemTrayIcon — on Plasma Wayland via SNI).
 
 Menu:
-  Stream z dźwiękiem: wykryty / nie wykryty      (informacja)
-  Do Discorda tylko: …                           (informacja)
-  [x] Tylko zaznaczone do Discorda
-      Cały system (przywróć)
-  Aplikacje z dźwiękiem:
+  Discord Go Live audio: active / not detected   (info)
+  To Discord only: …                             (info)
+  [x] Only selected apps
+      Whole system (restore)
+  Apps playing audio:
   [x] Warframe.x64.exe
   [ ] Firefox
-  (Który strumień Discorda? — tylko gdy wykrywanie jest niepewne)
-      Zakończ
+  (Which Discord stream? — only when detection is ambiguous)
+      Quit
 
-Obserwacja grafu działa w osobnym wątku (Watcher); stan przychodzi do GUI
-sygnałem Qt (połączenie kolejkowane między wątkami).
+Graph watching runs in a separate thread (Watcher); the state reaches the GUI
+through a Qt signal (queued connection between threads).
+
+Icon: data/icons/tray/warpipe-tray-{light,dark}[-active|-off].svg (installed as
+<appdir>/icons/tray). "light" = dark glyph for light panels, "dark" = light glyph
+for dark panels, chosen from the palette's text color. "-active" while enforcing
+with a capture present, "-off" when enforcement is disabled ("Whole system").
+Without those files: the theme icon io.github.gawson.Warpipe-symbolic, then a
+generic audio icon.
 """
 
 from __future__ import annotations
@@ -22,19 +29,90 @@ import signal
 import sys
 import threading
 import time
+from pathlib import Path
 
-from PySide6.QtCore import QObject, QTimer, Signal
-from PySide6.QtGui import QAction, QIcon
+from PySide6.QtCore import QObject, QSize, QTimer, Signal
+from PySide6.QtGui import (QAction, QColor, QGuiApplication, QIcon,
+                           QImageReader, QPalette, QPixmap)
 from PySide6.QtWidgets import (QApplication, QMenu, QMessageBox, QStyle,
                                QSystemTrayIcon)
 
-from . import APP_ID, APP_NAME
+from . import APP_ID, APP_NAME, DESKTOP_ID
 from .control import start_control_server
 from .enforcer import Enforcer, Status, Watcher
-from .planner import KIND_MIC, STATUS_AMBIGUOUS, STATUS_FOUND
+from .i18n import _, ngettext
+from .planner import KIND_MIC, STATUS_AMBIGUOUS
 from .state import Config, InstanceLock, SnapshotStore
 
 log = logging.getLogger("warpipe")
+
+ICON_STATE_NORMAL = ""
+ICON_STATE_ACTIVE = "active"
+ICON_STATE_OFF = "off"
+ICON_SIZES = (16, 22, 24, 32, 48, 64)
+THEME_ICON = DESKTOP_ID + "-symbolic"
+
+
+# ------------------------------------------------------------------ icons
+def tray_icons_dir(pkg_dir: Path | str | None = None) -> Path | None:
+    """Directory with the tray SVGs, resolved relative to the package:
+    <repo>/data/icons/tray in a checkout, <appdir>/icons/tray when installed."""
+    pkg = Path(pkg_dir) if pkg_dir is not None else Path(__file__).resolve().parent
+    base = pkg.parent
+    for d in (base / "data" / "icons" / "tray", base / "icons" / "tray"):
+        if d.is_dir():
+            return d
+    return None
+
+
+def tray_icon_name(variant: str, state: str = ICON_STATE_NORMAL) -> str:
+    return f"warpipe-tray-{variant}" + (f"-{state}" if state else "") + ".svg"
+
+
+def tray_icon_files(variant: str, state: str = ICON_STATE_NORMAL,
+                    icons_dir: Path | None = None) -> tuple[Path, Path | None] | None:
+    """(main SVG, 16 px SVG or None) for a variant/state, or None if missing."""
+    d = icons_dir if icons_dir is not None else tray_icons_dir()
+    if d is None:
+        return None
+    name = tray_icon_name(variant, state)
+    main = d / name
+    if not main.is_file():
+        return None
+    small = d / "16" / name
+    return main, (small if small.is_file() else None)
+
+
+def variant_for_text_color(color: QColor) -> str:
+    """Light text = dark panel → the "dark" set (light glyph), and vice versa."""
+    return "dark" if color.lightnessF() > 0.5 else "light"
+
+
+def palette_variant(app: QGuiApplication | None = None) -> str:
+    app = app or QGuiApplication.instance()
+    if app is None:
+        return "light"
+    return variant_for_text_color(app.palette().color(QPalette.ColorRole.WindowText))
+
+
+def icon_state(st: Status) -> str:
+    if not st.enabled:
+        return ICON_STATE_OFF
+    if st.detection is not None and st.detection.found:
+        return ICON_STATE_ACTIVE
+    return ICON_STATE_NORMAL
+
+
+def _svg_icon(main: Path, small: Path | None) -> QIcon:
+    icon = QIcon()
+    for size in ICON_SIZES:
+        src = small if (small is not None and size <= 16) else main
+        reader = QImageReader(str(src))
+        reader.setScaledSize(QSize(size, size))
+        img = reader.read()
+        if not img.isNull():
+            icon.addPixmap(QPixmap.fromImage(img))
+    return icon
 
 
 def _theme_icon(names: list[str], fallback: QStyle.StandardPixmap) -> QIcon:
@@ -46,12 +124,21 @@ def _theme_icon(names: list[str], fallback: QStyle.StandardPixmap) -> QIcon:
     return app.style().standardIcon(fallback) if app else QIcon()
 
 
+def load_tray_icon(variant: str, state: str, icons_dir: Path | None = None) -> QIcon:
+    files = tray_icon_files(variant, state, icons_dir)
+    if files is not None:
+        icon = _svg_icon(*files)
+        if not icon.isNull():
+            return icon
+        log.warning("could not load the tray icon %s — using the theme icon", files[0])
+    names = ([f"{DESKTOP_ID}-{state}-symbolic"] if state else []) + [THEME_ICON, "audio-volume-high", "audio-card"]
+    return _theme_icon(names, QStyle.StandardPixmap.SP_MediaVolume)
+
+
 def _streams_suffix(n: int) -> str:
     if n <= 1:
         return ""
-    if n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14):
-        return f" ({n} strumienie)"
-    return f" ({n} strumieni)"
+    return " (" + ngettext("{n} stream", "{n} streams", n).format(n=n) + ")"
 
 
 class _Bridge(QObject):
@@ -70,13 +157,17 @@ class TrayController(QObject):
         enforcer.on_status = self._bridge.status.emit
         enforcer.on_event = self._bridge.event.emit
 
-        self.icon_on = _theme_icon(["audio-volume-high", "audio-card"], QStyle.StandardPixmap.SP_MediaVolume)
-        self.icon_off = _theme_icon(["audio-volume-medium", "audio-volume-high"], QStyle.StandardPixmap.SP_MediaVolume)
+        self._icons: dict[tuple[str, str], QIcon] = {}
+        self.icon_key: tuple[str, str] | None = None
+        hints = QGuiApplication.styleHints()
+        scheme_changed = getattr(hints, "colorSchemeChanged", None) if hints is not None else None
+        if scheme_changed is not None:
+            scheme_changed.connect(self._on_theme_changed)
 
         self.menu = QMenu()
         self.menu.setToolTipsVisible(True)
         self.menu.aboutToShow.connect(self._on_about_to_show)
-        self.tray = QSystemTrayIcon(self.icon_off)
+        self.tray = QSystemTrayIcon(self.icon_for(enforcer.status))
         self.tray.setContextMenu(self.menu)
         self.tray.activated.connect(self._on_activated)
         self._signature = None
@@ -88,6 +179,19 @@ class TrayController(QObject):
         self.act_restore: QAction | None = None
         self.act_quit: QAction | None = None
         self.build_menu(enforcer.status)
+
+    # -------------------------------------------------------------- icon
+    def icon_for(self, st: Status) -> QIcon:
+        key = (palette_variant(), icon_state(st))
+        self.icon_key = key
+        icon = self._icons.get(key)
+        if icon is None:
+            icon = self._icons[key] = load_tray_icon(*key)
+        return icon
+
+    def _on_theme_changed(self, *_args) -> None:
+        self._icons.clear()
+        self._update_tray(self.enforcer.status)
 
     # -------------------------------------------------------------- menu
     def _menu_signature(self, st: Status) -> tuple:
@@ -114,22 +218,22 @@ class TrayController(QObject):
         route.setEnabled(False)
         msgs = list(st.warnings)
         if st.error:
-            msgs.append("Błąd: " + st.error)
+            msgs.append(_("Error: {error}").format(error=st.error))
         for w in msgs:
             a = m.addAction(w if len(w) <= 90 else w[:89] + "…")
             a.setToolTip(w)
             a.setEnabled(False)
         m.addSeparator()
 
-        self.act_enforce = m.addAction("Tylko zaznaczone do Discorda")
+        self.act_enforce = m.addAction(_("Only selected apps"))
         self.act_enforce.setCheckable(True)
         self.act_enforce.setChecked(st.enabled)
         self.act_enforce.triggered.connect(self._on_toggle_enforce)
-        self.act_restore = m.addAction("Cały system (przywróć)")
+        self.act_restore = m.addAction(_("Whole system (restore)"))
         self.act_restore.triggered.connect(self._on_restore)
         m.addSeparator()
 
-        label = m.addAction("Aplikacje z dźwiękiem:")
+        label = m.addAction(_("Apps playing audio:"))
         label.setEnabled(False)
         selected_cf = {k.casefold() for k in st.selected}
         for a in st.apps:
@@ -138,53 +242,53 @@ class TrayController(QObject):
             act.setChecked(a.key.casefold() in selected_cf)
             hints = a.hints()
             if hints:
-                # media.name tylko jako podpowiedź w UI (nie trafia do logów ani konfiguracji)
+                # media.name only as a UI hint (never goes to logs or the config)
                 act.setToolTip("\n".join(h if len(h) <= 80 else h[:79] + "…" for h in hints[:5]))
             act.triggered.connect(lambda checked, key=a.key: self._on_app(key, checked))
             self.app_actions[a.key] = act
         for key in st.missing_selected():
-            act = m.addAction(f"{key} (teraz nie gra)")
+            act = m.addAction(_("{app} (not playing now)").format(app=key))
             act.setCheckable(True)
             act.setChecked(True)
             act.triggered.connect(lambda checked, key=key: self._on_app(key, checked))
             self.app_actions[key] = act
         if not st.apps and not st.missing_selected():
-            none = m.addAction("(żadna aplikacja teraz nie gra)")
+            none = m.addAction(_("(no app is playing right now)"))
             none.setEnabled(False)
 
         det = st.detection
         if det is not None and (det.status == STATUS_AMBIGUOUS or self.enforcer.override):
-            sub = m.addMenu("Który strumień Discorda?")
-            auto = sub.addAction("Automatycznie")
+            sub = m.addMenu(_("Which Discord stream?"))
+            auto = sub.addAction(_("Automatic"))
             auto.setCheckable(True)
             auto.setChecked(not self.enforcer.override)
-            auto.triggered.connect(lambda _=False: self._on_pick_capture(None))
+            auto.triggered.connect(lambda _checked=False: self._on_pick_capture(None))
             for c in det.candidates:
                 if c.kind == KIND_MIC:
                     continue
-                warn = (" (sprawdź, czy to nie mikrofon)"
+                warn = (" (" + _("check that it isn't a microphone") + ")"
                         if c.needs_confirm and not c.confirmed_by(self.enforcer.dcfg) else "")
-                act = sub.addAction(f"#{c.id} {c.node.name or '?'} — {', '.join(c.reasons)[:60]}{warn}")
+                act = sub.addAction(f"#{c.id} {c.node.name or '?'} — {c.reasons_text(60)}{warn}")
                 act.setCheckable(True)
                 act.setChecked(bool(self.enforcer.override) and c.serial in self.enforcer.override)
-                act.triggered.connect(lambda _=False, s=c.serial: self._on_pick_capture([s]))
+                act.triggered.connect(lambda _checked=False, s=c.serial: self._on_pick_capture([s]))
 
         m.addSeparator()
-        self.act_quit = m.addAction("Zakończ")
+        self.act_quit = m.addAction(_("Quit"))
         self.act_quit.triggered.connect(self._on_quit)
         self._update_tray(st)
 
     def _update_tray(self, st: Status) -> None:
-        self.tray.setIcon(self.icon_on if st.enabled else self.icon_off)
+        self.tray.setIcon(self.icon_for(st))
         tip = f"{APP_NAME}\n{st.headline()}\n{st.routing_text()}"
         if st.error:
-            tip += f"\nBłąd: {st.error}"
+            tip += "\n" + _("Error: {error}").format(error=st.error)
         self.tray.setToolTip(tip)
 
-    # ------------------------------------------------------------ zdarzenia
+    # ------------------------------------------------------------ events
     def _on_status(self, st: Status) -> None:
-        # Odroczone: status może przyjść w trakcie obsługi kliknięcia w akcję menu,
-        # a przebudowa usuwa akcje — nie wolno tego robić wewnątrz ich sygnału.
+        # Deferred: a status may arrive while a menu action's click is being handled,
+        # and rebuilding deletes the actions — that must not happen inside their signal.
         self._pending_status = st
         if not getattr(self, "_rebuild_scheduled", False):
             self._rebuild_scheduled = True
@@ -209,11 +313,11 @@ class TrayController(QObject):
             self.tray.showMessage(APP_NAME, msg, icon, 4000)
 
     def _on_about_to_show(self) -> None:
-        # Lista aplikacji budowana od nowa przy otwarciu menu.
+        # The app list is rebuilt whenever the menu opens.
         try:
             st = self.enforcer.refresh("menu")
         except Exception:  # pragma: no cover
-            log.exception("odświeżanie przy otwarciu menu")
+            log.exception("refresh on menu open")
             return
         self.build_menu(st)
 
@@ -240,9 +344,9 @@ class TrayController(QObject):
         if app is not None:
             app.quit()
 
-    # ------------------------------------------------------------ pokazanie
+    # ------------------------------------------------------------ showing
     def show_when_available(self, timeout_s: float = 60.0) -> None:
-        """Przy autostarcie panel Plasmy może jeszcze nie działać — czekamy na niego."""
+        """At autostart the Plasma panel may not be up yet — wait for it."""
         deadline = time.monotonic() + timeout_s
 
         def attempt():
@@ -258,30 +362,32 @@ def run_tray(args, config: Config, pw) -> int:
     app = QApplication.instance() or QApplication(sys.argv[:1])
     app.setApplicationName(APP_ID)
     app.setApplicationDisplayName(APP_NAME)
-    app.setDesktopFileName("warpipe")
+    app.setDesktopFileName(DESKTOP_ID)
+    app.setWindowIcon(QIcon.fromTheme(DESKTOP_ID))
     app.setQuitOnLastWindowClosed(False)
 
     lock = InstanceLock()
     if not lock.acquire():
         QMessageBox.information(None, APP_NAME,
-                                "Warpipe już działa — jego ikona jest w zasobniku (obok zegara).")
+                                _("Warpipe is already running — its icon is in the system tray "
+                                  "(next to the clock)."))
         return 4
 
     enforcer = Enforcer(pw, config, SnapshotStore())
     watcher = Watcher(enforcer, pw)
     ctl = TrayController(enforcer, watcher)
-    # Kanał sterowania (wtyczka OpenDeck, --toggle): własne wątki stdlib, które wołają
-    # tylko metody Enforcera (RLock). Stan do GUI idzie dalej przez sygnał _Bridge
-    # (połączenie kolejkowane), więc obiekty Qt dotyka wyłącznie wątek GUI.
+    # Control channel (OpenDeck plugin, --toggle): its own stdlib threads that only call
+    # Enforcer methods (RLock). The state still reaches the GUI via the _Bridge signal
+    # (queued connection), so Qt objects are only touched by the GUI thread.
     server = start_control_server(enforcer)
 
     def on_signal(signum, frame):
-        log.info("sygnał %s — kończę", signum)
+        log.info("signal %s — quitting", signum)
         app.quit()
 
     for s in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal.signal(s, on_signal)
-    # Python obsługuje sygnały tylko, gdy dostaje sterowanie — budzimy go co 0,5 s.
+    # Python only handles signals when it gets control — wake it up every 0.5 s.
     tick = QTimer()
     tick.timeout.connect(lambda: None)
     tick.start(500)
@@ -298,7 +404,7 @@ def run_tray(args, config: Config, pw) -> int:
         thread.join(timeout=5)
         ok, msg = enforcer.shutdown()
         if not ok:
-            log.warning("przywracanie przy wyjściu nieudane: %s", msg)
+            log.warning("restore on exit failed: %s", msg)
         ctl.tray.hide()
         lock.release()
     return rc

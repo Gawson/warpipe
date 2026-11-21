@@ -1,15 +1,15 @@
 #!/bin/bash
-# Test na żywo: wtyczka OpenDeck ↔ narzędzie (--watch) ↔ PipeWire.
+# Live test: OpenDeck plugin <-> tool (--watch) <-> PipeWire.
 #
-# Zasady (twarde, jak w live_pipewire.sh):
-#  - tylko WŁASNE obiekty z prefiksem ddp-test: null sink (pactl load-module), atrapy aplikacji
-#    (pw-cat grające CISZĘ z /dev/zero), atrapy strumieni Discorda (pw-cat --record do /dev/null);
-#  - narzędzie dostaje konfigurację testową: „Discord” = tylko węzły ddp-test-discord*;
-#  - OpenDeck NIE jest potrzebny: tests/fake_opendeck.py uruchamia wtyczkę tak jak OpenDeck;
-#  - sprzątanie w trap EXIT (także przy błędzie): procesy z <tmp>/pids, moduł null sinka;
-#    potem weryfikacja przez pw-dump, że nic nie zostało, i że stan WirePlumbera się nie zmienił.
+# Rules (strict, as in live_pipewire.sh):
+#  - only OUR OWN objects with the ddp-test prefix: a null sink (pactl load-module), fake apps
+#    (pw-cat playing SILENCE from /dev/zero), fake Discord streams (pw-cat --record to /dev/null);
+#  - the tool gets a test config: "Discord" = only the ddp-test-discord* nodes;
+#  - OpenDeck is NOT needed: tests/fake_opendeck.py starts the plugin the way OpenDeck does;
+#  - cleanup in trap EXIT (also on error): processes from <tmp>/pids, the null sink module;
+#    then pw-dump verifies that nothing is left and that the WirePlumber state did not change.
 #
-# Wynik: linie PASS:/FAIL:/INFO:, na końcu podsumowanie; kod wyjścia 0 = wszystko PASS.
+# Output: PASS:/FAIL:/INFO: lines and a summary; exit code 0 = everything passed.
 
 set -u
 HERE=$(cd "$(dirname "$0")/.." && pwd)
@@ -18,6 +18,7 @@ mkdir -p "$BASE_TMP"
 TMP=$(mktemp -d "$BASE_TMP/ddp-live.XXXXXX")
 export DISCORD_DZWIEK_CONFIG_DIR="$TMP/config"
 export DISCORD_DZWIEK_RUNTIME_DIR="$TMP/run"
+export WARPIPE_LANG=en   # the checks below expect English texts (tool and plugin)
 mkdir -p "$DISCORD_DZWIEK_CONFIG_DIR" "$DISCORD_DZWIEK_RUNTIME_DIR"
 SINK=ddp-test-sink
 WP_STATE_DIR="$HOME/.local/state/wireplumber"

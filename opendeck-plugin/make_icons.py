@@ -1,14 +1,16 @@
 #!/usr/bin/python3 -I
-"""Rysuje statyczne ikony wtyczki (manifest) tym samym kodem, którym wtyczka rysuje przyciski.
+"""Draws the plugin's static icons (manifest) with the same code the plugin uses for keys.
 
-  icons/plugin(.png|@2x.png)         72/144  — ikona wtyczki
-  icons/category(.png|@2x.png)       28/56   — ikona kategorii „Discord”
-  icons/action-app(.png|@2x.png)     20/40   — ikona akcji na liście
+  icons/plugin(.png|@2x.png)         72/144  — plugin icon
+  icons/category(.png|@2x.png)       28/56   — "Discord" category icon
+  icons/action-app(.png|@2x.png)     20/40   — action icon in the list
   icons/action-system(.png|@2x.png)  20/40
-  icons/key-app(.png|@2x.png)        72/144  — domyślny obrazek przycisku (zanim wtyczka go zmieni)
+  icons/key-app(.png|@2x.png)        72/144  — default key image (before the plugin replaces it)
   icons/key-system(.png|@2x.png)     72/144
 
-Użycie: python3 make_icons.py  (QT_QPA_PLATFORM nie trzeba ustawiać — używa offscreen)
+Static icons are always English (the manifest is English too).
+
+Usage: python3 make_icons.py  (no need to set QT_QPA_PLATFORM — uses offscreen)
 """
 
 import os
@@ -33,7 +35,7 @@ def main() -> int:
     def save(img, name):
         path = os.path.join(out, name)
         if not img.save(path, "PNG"):
-            raise SystemExit(f"nie udało się zapisać {path}")
+            raise SystemExit(f"failed to write {path}")
 
     for scale, suffix in ((1, ""), (2, "@2x")):
         save(render_icon("app", 72 * scale, "#ffffff", "#22a356"), f"plugin{suffix}.png")
@@ -42,7 +44,7 @@ def main() -> int:
         save(render_icon("system", 20 * scale, "#ffffff"), f"action-system{suffix}.png")
         save(render(Visual("app", S_OFF, "", ""), 72 * scale), f"key-app{suffix}.png")
         save(render(Visual("system", S_SYS_OFF, SYSTEM_LABEL, ""), 72 * scale), f"key-system{suffix}.png")
-    print(f"ikony zapisane w {out}")
+    print(f"icons written to {out}")
     return 0
 
 

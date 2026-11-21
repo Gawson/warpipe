@@ -1,17 +1,17 @@
-"""Pilnowanie połączeń: stan, wykonywanie planu, obserwacja grafu.
+"""Link enforcement: state, plan execution, graph watching.
 
-Obserwacja grafu: `pw-dump -m` jako sygnał „coś się zmieniło”, a po krótkim
-uspokojeniu (debounce) jeden pełny `pw-dump` jako spójny obraz grafu.
-Dlaczego nie samo odpytywanie co 1 s: pw-dump co sekundę to ciągłe budzenie
-procesu i ~0,4 MB JSON-a do parsowania nawet gdy nic się nie dzieje, a reakcja
-i tak jest opóźniona. Dlaczego nie składanie stanu z samych delt -m: delty są
-częściowe (np. same params), a usunięcia to gołe {"id": N, "info": null} —
-łatwo o rozjazd. Hybryda daje reakcję w ~0,3 s, zerowy koszt w bezczynności
-i zawsze pełny, spójny obraz do planowania. Dodatkowo co kilkanaście sekund
-pełne odświeżenie na wszelki wypadek, a gdy monitor padnie — odpytywanie co 2 s.
+Graph watching: `pw-dump -m` is used as a "something changed" signal, and after
+a short settle time (debounce) one full `pw-dump` gives a consistent picture of
+the graph. Why not just poll every second: pw-dump every second means constant
+wake-ups and ~0.4 MB of JSON to parse even when nothing happens, and the
+reaction is still delayed. Why not build the state from -m deltas alone: deltas
+are partial (e.g. params only) and removals are bare {"id": N, "info": null} —
+easy to drift. The hybrid reacts in ~0.3 s, costs nothing when idle and always
+plans on a full, consistent picture. On top of that there is a full refresh
+every few seconds just in case, and polling every 2 s when the monitor dies.
 
-Zdarzenia klientów (Client) są ignorowane: każde nasze wywołanie pw-dump/pw-link
-tworzy klienta, więc reagowanie na nie dawałoby nieskończoną pętlę.
+Client events are ignored: each of our own pw-dump/pw-link calls creates a
+client, so reacting to them would cause an endless loop.
 """
 
 from __future__ import annotations
@@ -29,9 +29,10 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from .graph import T_LINK, T_NODE, T_PORT, Graph, _as_int
-from .planner import (STATUS_FOUND, STATUS_LABEL_PL, AppEntry, Detection,
-                      DetectConfig, Op, apps_in_stream, detect, link_entry,
-                      list_apps, plan_apply, plan_restore, snapshot_originals)
+from .i18n import _
+from .planner import (AppEntry, Detection, DetectConfig, Op, apps_in_stream,
+                      detect, link_entry, list_apps, plan_apply, plan_restore,
+                      snapshot_originals, status_label)
 from .pw import PwError
 from .state import Config, SnapshotStore
 
@@ -50,9 +51,9 @@ class Status:
     warnings: list[str] = field(default_factory=list)
     last_action: str = ""
     paused: bool = False
-    retry_soon: bool = False  # np. aplikacja nie ma jeszcze portów — sprawdź za chwilę
-    # Klucze aplikacji, których dźwięk JEST teraz połączony z dźwiękiem streamu
-    # (stan faktyczny grafu po odświeżeniu, nie samo „zaznaczone”).
+    retry_soon: bool = False  # e.g. an app has no ports yet — check again shortly
+    # Keys of apps whose audio IS linked to the stream audio right now
+    # (the actual graph state after a refresh, not just "selected").
     in_stream: list[str] = field(default_factory=list)
 
     @property
@@ -63,19 +64,24 @@ class Status:
 
     def headline(self) -> str:
         if self.error and self.detection is None:
-            return "Błąd PipeWire"
-        return STATUS_LABEL_PL.get(self.capture_status, "Stream z dźwiękiem: ?")
+            return _("PipeWire error")
+        return status_label(self.capture_status)
 
     def routing_text(self) -> str:
-        if not self.enabled:
-            return "Do Discorda: cały dźwięk systemu"
-        if not self.selected:
-            return "Do Discorda: nic (nic nie zaznaczono)"
-        return "Do Discorda tylko: " + ", ".join(self.selected)
+        return routing_text(self.enabled, self.selected)
 
     def missing_selected(self) -> list[str]:
         present = {a.key.casefold() for a in self.apps}
         return [k for k in self.selected if k.casefold() not in present]
+
+
+def routing_text(enabled: bool, selected: list[str]) -> str:
+    """Where Discord's stream audio comes from, in one line."""
+    if not enabled:
+        return _("To Discord: all system audio")
+    if not selected:
+        return _("To Discord: nothing (no app selected)")
+    return _("To Discord only: {apps}").format(apps=", ".join(selected))
 
 
 EventCallback = Callable[[str, str], None]
@@ -83,7 +89,7 @@ StatusCallback = Callable[[Status], None]
 
 
 class Enforcer:
-    """Stan narzędzia + wykonanie planu. Metody bezpieczne wątkowo (RLock)."""
+    """Tool state + plan execution. Methods are thread-safe (RLock)."""
 
     def __init__(
         self,
@@ -118,18 +124,18 @@ class Enforcer:
         self.loop_pause = loop_pause
         self._lock = threading.RLock()
         self._last_group: set[int] = set()
-        self._confirmed: set[int] = set()  # serial węzłów rozpoznanych jako dźwięk streamu
-        self._instance: object = _UNSET    # tożsamość uruchomienia PipeWire (Graph.instance_id)
+        self._confirmed: set[int] = set()  # serials of nodes recognized as stream audio
+        self._instance: object = _UNSET    # identity of the PipeWire session (Graph.instance_id)
         self._apply_times: deque[float] = deque()
         self._paused_until = 0.0
         self._last_error: str | None = None
-        # Dodatkowi odbiorcy stanu (np. kanał sterowania). Wołani z wątku, który
-        # odświeżył stan — muszą być szybcy i nie mogą blokować (najlepiej: tylko
-        # ustawić flagę i obudzić własny wątek).
+        # Extra status listeners (e.g. the control channel). Called from the thread
+        # that refreshed the state — they must be fast and must not block (ideally:
+        # just set a flag and wake their own thread).
         self._status_listeners: list[StatusCallback] = []
         self.status = Status(enabled=self.enabled, selected=list(self.selected))
         if getattr(store, "load_error", None):
-            log.warning("%s — zaczynam z pustą migawką", store.load_error)
+            log.warning("%s — starting with an empty snapshot", store.load_error)
 
     # ---------------------------------------------------------------- helpers
     def _emit(self, kind: str, msg: str) -> None:
@@ -171,23 +177,23 @@ class Enforcer:
         try:
             self.config.save()
         except OSError as e:
-            self._emit("error", f"Nie mogę zapisać ustawień: {e}")
+            self._emit("error", _("Can't save settings: {error}").format(error=e))
 
     def _dump(self) -> Graph:
         return Graph.from_dump(self.pw.dump())
 
     def _sync_instance(self, graph: Graph) -> None:
-        """Po restarcie PipeWire numery (object.serial) zaczynają się od nowa:
-        zapominamy wszystko, co było zapamiętane po serialach."""
+        """After a PipeWire restart the numbers (object.serial) start over:
+        forget everything that was remembered by serial."""
         inst = graph.instance_id
         if self._instance is not _UNSET and inst != self._instance:
-            log.info("PipeWire uruchomiony ponownie — zapominam stare numery węzłów")
+            log.info("PipeWire restarted — forgetting old node numbers")
             self._confirmed.clear()
             self._last_group = set()
             self.override = None
         self._instance = inst
         if self.store.check_instance(inst):
-            log.info("migawka połączeń pochodzi z innego uruchomienia PipeWire — odrzucam ją")
+            log.info("the link snapshot is from a different PipeWire session — discarding it")
             try:
                 self.store.save()
             except OSError:
@@ -202,10 +208,10 @@ class Enforcer:
                 pass
 
     def _verify_created(self, graph: Graph, ops: list[Op]) -> Graph:
-        """Kontrola po wykonaniu: pw-link dostaje numery portów z wcześniejszego
-        pw-dump, a PipeWire od razu używa zwolnionych numerów ponownie. Jeśli
-        w międzyczasie port zniknął i jego numer dostał inny port, nasze połączenie
-        trafiło nie tam. Takie połączenie (tylko z NASZYM znacznikiem) usuwamy."""
+        """Post-check: pw-link gets port numbers from an earlier pw-dump, and
+        PipeWire reuses freed numbers right away. If a port disappeared in the
+        meantime and another port got its number, our link went to the wrong
+        place. Such a link (only one with OUR marker) is removed."""
         pairs = graph.link_pairs()
         bad = []
         for op in ops:
@@ -219,15 +225,15 @@ class Enforcer:
         if not bad:
             return graph
         for op in bad:
-            log.warning("połączenie trafiło do innego portu niż planowano (numer portu użyty ponownie) "
-                        "— usuwam: %s", op.desc)
+            log.warning("link went to a different port than planned (port number reused) "
+                        "— removing: %s", op.desc)
             try:
                 self.pw.unlink(op.out_port, op.in_port)
             except PwError as e:
-                log.warning("nie udało się usunąć błędnego połączenia: %s", e)
+                log.warning("failed to remove the wrong link: %s", e)
         return self._dump()
 
-    # ------------------------------------------------------------- odświeżanie
+    # ------------------------------------------------------------- refresh
     def refresh(self, reason: str = "") -> Status:
         with self._lock:
             try:
@@ -243,7 +249,7 @@ class Enforcer:
             known = self._known(graph)
             det = detect(graph, self.dcfg, self.override, known)
             if self.override and not any(s in graph.node_by_serial for s in self.override):
-                log.info("ręcznie wybrany węzeł zniknął — wracam do wykrywania automatycznego")
+                log.info("the manually chosen node is gone — back to automatic detection")
                 self.override = None
                 det = detect(graph, self.dcfg, None, known)
             if det.found:
@@ -269,9 +275,9 @@ class Enforcer:
                     if not ok:
                         error = action
                     self._note_apply(now)
-                    graph = None  # nieaktualny; nie używać dalej
+                    graph = None  # stale; do not use any further
 
-            # Migawki węzłów, które zniknęły, są bezużyteczne (połączenia zniknęły z nimi).
+            # Snapshots of nodes that are gone are useless (their links are gone too).
             try:
                 g2 = graph if graph is not None else self._dump()
                 if created:
@@ -288,7 +294,7 @@ class Enforcer:
                 in_stream = apps_in_stream(g2, det.group_nodes, apps)
 
             if appeared and self.enabled:
-                self._emit("capture_found", "Wykryto stream z dźwiękiem. " + self._routing_text())
+                self._emit("capture_found", _("Go Live audio detected.") + " " + self._routing_text())
             self._last_group = group_serials
 
             if error and error != self._last_error:
@@ -296,7 +302,7 @@ class Enforcer:
             self._last_error = error
             warnings = list(det.warnings)
             if self.clock() < self._paused_until:
-                warnings.append("Coś ciągle zmienia połączenia (Discord/WirePlumber?) — chwilowo wstrzymane.")
+                warnings.append(_("Something keeps changing the links (Discord/WirePlumber?) — paused for a moment."))
             return self._publish(Status(
                 detection=det, apps=apps, enabled=self.enabled, selected=list(self.selected),
                 error=error, warnings=warnings, last_action=action,
@@ -309,7 +315,7 @@ class Enforcer:
         if self.store.instance == graph.instance_id:
             for k, cap in self.store.captures.items():
                 n = graph.node_by_serial.get(_as_int(k))
-                # serial + ta sama nazwa węzła + nadal strumień nagrywania
+                # serial + same node name + still a recording stream
                 if n is not None and n.media_class == "Stream/Input/Audio" and cap.get("node_name") == n.name:
                     known.add(n.serial)
         return {s for s in known if s in graph.node_by_serial}
@@ -324,11 +330,11 @@ class Enforcer:
         if len(self._apply_times) > self.loop_limit:
             self._paused_until = now + self.loop_pause
             self._apply_times.clear()
-            self._emit("loop", "Coś ciągle zmienia połączenia do Discorda — wstrzymuję pilnowanie na chwilę.")
+            self._emit("loop", _("Something keeps changing the links to Discord — pausing enforcement for a moment."))
 
     def _execute_apply(self, graph: Graph, det: Detection, plan) -> tuple[bool, str, list[Op]]:
-        """Zwraca (ok, opis, utworzone operacje — do kontroli po wykonaniu)."""
-        # 1. migawka PRZED jakąkolwiek zmianą
+        """Returns (ok, description, created ops — for the post-check)."""
+        # 1. snapshot BEFORE any change
         self.store.check_instance(graph.instance_id)
         for c in det.group:
             entries = []
@@ -350,21 +356,21 @@ class Enforcer:
         try:
             self.store.save()
         except OSError as e:
-            return False, f"Nie mogę zapisać migawki połączeń ({e}) — nic nie zmieniam.", []
+            return False, _("Can't save the link snapshot ({error}) — not changing anything.").format(error=e), []
 
-        # 2. najpierw nowe połączenia (bez przerwy w dźwięku), potem usuwanie
+        # 2. new links first (no gap in the audio), then removals
         created = deleted = 0
         created_ops: list[Op] = []
         restored_any = False
         result: tuple[bool, str] | None = None
         for op in plan.links:
             try:
-                # Oryginał z migawki odtwarzamy BEZ znacznika „managed” — to znowu stan
-                # sprzed zmian i „Cały system” ma go zostawić.
+                # An original from the snapshot is recreated WITHOUT the "managed" marker —
+                # it is the pre-change state again and "Whole system" must keep it.
                 r = self.pw.link(op.out_port, op.in_port, managed=op.managed)
             except PwError as e:
-                log.warning("link nieudany: %s (%s)", op.desc, e)
-                result = (False, f"{e} — nie usuwam pozostałych połączeń.")
+                log.warning("link failed: %s (%s)", op.desc, e)
+                result = (False, _("{error} — not removing the remaining links.").format(error=e))
                 break
             if r == "created":
                 created += 1
@@ -373,7 +379,7 @@ class Enforcer:
                 cap = graph.nodes.get(op.in_node)
                 if cap is not None and self.store.mark_restored(cap.serial, op.out_serial, op.in_serial):
                     restored_any = True
-            log.info("połączono%s: %s", " (oryginał)" if op.original else "", op.desc)
+            log.info("linked%s: %s", " (original)" if op.original else "", op.desc)
         if restored_any:
             try:
                 self.store.save()
@@ -389,28 +395,28 @@ class Enforcer:
                 errors.append(str(e))
                 continue
             deleted += r == "deleted"
-            log.info("rozłączono: %s", op.desc)
-        action = f"połączono {created}, rozłączono {deleted}"
+            log.info("unlinked: %s", op.desc)
+        action = _("linked {created}, unlinked {deleted}").format(created=created, deleted=deleted)
         if errors:
             return False, errors[0], created_ops
         return True, action, created_ops
 
-    # ------------------------------------------------------------ przywracanie
+    # ------------------------------------------------------------ restore
     def restore(self, reason: str = "") -> tuple[bool, str]:
         with self._lock:
             try:
                 graph = self._dump()
             except PwError as e:
                 return False, str(e)
-            self._sync_instance(graph)   # migawka z innego uruchomienia PipeWire → odrzucona
-            self._prune_store(graph)     # migawki węzłów, których już nie ma
+            self._sync_instance(graph)   # snapshot from another PipeWire session → discarded
+            self._prune_store(graph)     # snapshots of nodes that no longer exist
             plan = plan_restore(graph, self.store.data)
             for note in plan.notes:
-                log.info("przywracanie: %s", note)
+                log.info("restore: %s", note)
             errors = []
             created = deleted = 0
             created_ops: list[Op] = []
-            # Kolejność z planu: odtworzenie, zamiana oznaczonych oryginałów, usunięcie naszych.
+            # Plan order: recreate, replace marked originals, remove ours.
             for op in plan.ops:
                 try:
                     if op.kind == "link":
@@ -418,10 +424,10 @@ class Enforcer:
                         if r == "created":
                             created += 1
                             created_ops.append(op)
-                        log.info("przywrócono: %s", op.desc)
+                        log.info("restored: %s", op.desc)
                     else:
                         deleted += self.pw.unlink(op.out_port, op.in_port) == "deleted"
-                        log.info("usunięto nasze: %s", op.desc)
+                        log.info("removed ours: %s", op.desc)
                 except PwError as e:
                     errors.append(str(e))
             if created_ops:
@@ -436,27 +442,28 @@ class Enforcer:
                 self.store.save()
             except OSError:
                 pass
-            return True, f"przywrócono {created}, usunięto {deleted}"
+            return True, _("restored {created}, removed {deleted}").format(created=created, deleted=deleted)
 
-    # ---------------------------------------------------------- akcje z UI/CLI
+    # ---------------------------------------------------------- UI/CLI actions
     def set_enabled(self, on: bool) -> Status:
         with self._lock:
             self.enabled = bool(on)
             self._paused_until = 0.0
             self._save_config()
             if on:
-                st = self.refresh("włączono")
+                st = self.refresh("enabled")
                 if st.detection is not None and st.detection.found:
                     self._emit("applied", self._routing_text())
                 else:
-                    self._emit("applied", "Włączone. Zadziała, gdy zaczniesz stream z dźwiękiem. " + self._routing_text())
+                    self._emit("applied", _("Enabled. Takes effect when you start a Go Live stream with sound.")
+                               + " " + self._routing_text())
                 return st
-            ok, msg = self.restore("wyłączono")
+            ok, msg = self.restore("disabled")
             if ok:
-                self._emit("restored", "Do Discorda idzie cały dźwięk systemu.")
+                self._emit("restored", _("All system audio goes to Discord."))
             else:
-                self._emit("error", f"Nie udało się przywrócić: {msg}")
-            return self.refresh("po przywróceniu")
+                self._emit("error", _("Restore failed: {error}").format(error=msg))
+            return self.refresh("after restore")
 
     def set_app_selected(self, key: str, on: bool) -> Status:
         with self._lock:
@@ -468,7 +475,7 @@ class Enforcer:
                 self.enabled = True
             self._paused_until = 0.0
             self._save_config()
-            st = self.refresh("zmiana wyboru")
+            st = self.refresh("selection changed")
             if self.enabled:
                 self._emit("applied", self._routing_text())
             return st
@@ -477,21 +484,21 @@ class Enforcer:
         with self._lock:
             self.selected = list(keys)
 
-    # ------------------------------------------- przełączanie jednej aplikacji
-    # (przycisk wtyczki OpenDeck, `--toggle`). Zasady:
-    #  - „Cały system” (pilnowanie wyłączone) + aplikacja X → pilnowanie włączone,
-    #    wybór = tylko {X};
-    #  - pilnowanie włączone, X zaznaczona → odznacz X; jeśli nic nie zostało
-    #    zaznaczone → z powrotem „Cały system” (wyłączenie + przywrócenie);
-    #  - pilnowanie włączone, X niezaznaczona → dodaj X.
+    # ------------------------------------------------ toggling a single app
+    # (OpenDeck plugin key, `--toggle`). Rules:
+    #  - "Whole system" (enforcement off) + app X → enforcement on,
+    #    selection = just {X};
+    #  - enforcement on, X selected → unselect X; if nothing is left selected →
+    #    back to "Whole system" (disable + restore);
+    #  - enforcement on, X not selected → add X.
 
     def is_app_effective(self, key: str) -> bool:
-        """Czy X jest teraz wybrana „na wyłączność” (pilnowanie włączone i X zaznaczona)."""
+        """Is X currently in effect (enforcement on and X selected)?"""
         with self._lock:
             return self.enabled and key.casefold() in {k.casefold() for k in self.selected}
 
     def _canonical_key(self, key: str) -> str:
-        """Nazwa tak, jak ją widać w grafie albo w zapisanym wyborze (wielkość liter)."""
+        """The name as seen in the graph or in the saved selection (letter case)."""
         cf = key.casefold()
         for a in self.status.apps:
             if a.key.casefold() == cf:
@@ -510,7 +517,7 @@ class Enforcer:
         with self._lock:
             key = self._canonical_key(key)
             if self.is_app_effective(key) == bool(on):
-                return self.status, ("Bez zmian: " + self._routing_text())
+                return self.status, _("No change: {routing}").format(routing=self._routing_text())
             return self._set_app_effective(key, bool(on))
 
     def _set_app_effective(self, key: str, on: bool) -> tuple[Status, str]:
@@ -520,31 +527,30 @@ class Enforcer:
                 self.enabled = True
                 self._paused_until = 0.0
                 self._save_config()
-                st = self.refresh("przycisk: tylko ta aplikacja")
+                st = self.refresh("key: only this app")
                 self._emit("applied", self._routing_text())
-                return st, f"Do Discorda tylko: {key}"
+                return st, routing_text(True, [key])
             st = self.set_app_selected(key, True)
-            return st, f"Dodano {key}. " + self._routing_text()
+            return st, _("Added {app}.").format(app=key) + " " + self._routing_text()
         remaining = [k for k in self.selected if k.casefold() != key.casefold()]
         if not remaining:
             self.selected = []
             st = self.set_enabled(False)
-            return st, (f"Odznaczono {key}. Nic nie jest zaznaczone, więc do Discorda "
-                        "idzie cały dźwięk systemu.")
+            return st, _("Removed {app}. Nothing is selected, so all system audio goes to Discord.").format(app=key)
         st = self.set_app_selected(key, False)
-        return st, f"Odznaczono {key}. " + self._routing_text()
+        return st, _("Removed {app}.").format(app=key) + " " + self._routing_text()
 
     def set_capture_override(self, serials: list[int] | None, remember: bool = True) -> Status:
-        """Ręczny wybór strumienia Discorda (menu / --capture).
+        """Manual choice of the Discord stream (menu / --capture).
 
-        remember=True: jeśli wybrany strumień był rozpoznany tylko po monitorze
-        wyjścia (mógłby to być mikrofon), zapamiętujemy potwierdzenie w konfiguracji
-        (program, node.name, wyjście) — następnym razem zostanie wybrany sam."""
+        remember=True: if the chosen stream was recognized only by an output
+        monitor (it could be a microphone), the confirmation is remembered in the
+        config (program, node.name, output sink) — next time it is picked automatically."""
         with self._lock:
             self.override = list(serials) if serials else None
             if serials and remember:
                 self._remember_confirmation(list(serials))
-            return self.refresh("wybór strumienia")
+            return self.refresh("stream chosen")
 
     def _remember_confirmation(self, serials: list[int]) -> None:
         try:
@@ -558,28 +564,28 @@ class Enforcer:
         try:
             self.config.save()
         except OSError as e:
-            self._emit("error", f"Nie mogę zapisać ustawień: {e}")
+            self._emit("error", _("Can't save settings: {error}").format(error=e))
         self.dcfg = dataclasses.replace(self.dcfg, confirmed=tuple(self.config.confirmed_captures))
-        log.info("zapamiętano potwierdzony strumień: %s",
+        log.info("remembered the confirmed stream: %s",
                  "; ".join(f"{p} / {n} / {s}" for p, n, s in sigs))
 
     def shutdown(self) -> tuple[bool, str]:
-        """Przy wyjściu: przywróć stan sprzed naszych zmian."""
+        """On exit: restore the state from before our changes."""
         with self._lock:
-            ok, msg = self.restore("zamykanie")
-            log.info("zamykanie: %s", msg)
+            ok, msg = self.restore("shutdown")
+            log.info("shutdown: %s", msg)
             return ok, msg
 
 
 # --------------------------------------------------------------------------
-# Obserwacja grafu
+# Graph watching
 # --------------------------------------------------------------------------
 
 class MonitorParser:
-    """Parser strumienia `pw-dump -m -N`: kolejne tablice JSON zakończone linią "]".
+    """Parser for the `pw-dump -m -N` stream: consecutive JSON arrays ending with a "]" line.
 
-    feed() zwraca True, jeśli w paczce była istotna zmiana (węzeł/port/połączenie
-    dodane lub usunięte, albo zmiana właściwości/portów węzła).
+    feed() returns True if the batch contained a relevant change (a node/port/link
+    added or removed, or a change of a node's properties/ports).
     """
 
     RELEVANT = {T_NODE, T_PORT, T_LINK}
@@ -611,7 +617,7 @@ class MonitorParser:
             try:
                 arr = json.loads(chunk)
             except json.JSONDecodeError:
-                log.debug("monitor: nie udało się sparsować paczki, odświeżam na wszelki wypadek")
+                log.debug("monitor: failed to parse a batch, refreshing just in case")
                 relevant = True
                 continue
             self.arrays += 1
@@ -644,9 +650,9 @@ class MonitorParser:
                 continue
             info = o.get("info") or {}
             cm = info.get("change-mask") or []
-            # Pierwsza emisja obiektu ma "props" w change-mask; późniejsze zmiany
-            # parametrów/stanu już nie. Chroni też przed sklejeniem usunięcia
-            # i ponownego użycia tego samego id.
+            # The first emission of an object has "props" in change-mask; later
+            # param/state changes don't. Also protects against a removal and a
+            # reuse of the same id being merged.
             if "props" in cm:
                 relevant = True
             elif t == T_NODE and ("input-ports" in cm or "output-ports" in cm):
@@ -655,7 +661,7 @@ class MonitorParser:
 
 
 class Watcher:
-    """Pętla: czyta pw-dump -m, po debounce woła enforcer.refresh()."""
+    """Loop: reads pw-dump -m and calls enforcer.refresh() after a debounce."""
 
     def __init__(
         self,
@@ -687,8 +693,8 @@ class Watcher:
         self.refresh_count = 0
 
     def _wake(self) -> None:
-        # Pod blokadą: po zamknięciu potoku numer deskryptora mógłby zostać
-        # użyty ponownie przez inny plik — nie wolno wtedy do niego pisać.
+        # Under the lock: after the pipe is closed its descriptor number could be
+        # reused by another file — it must not be written to then.
         with self._fd_lock:
             if self._wake_w < 0:
                 return
@@ -710,12 +716,12 @@ class Watcher:
         return self._stop.is_set()
 
     def _do_refresh(self) -> bool:
-        """Zwraca True, jeśli warto odświeżyć ponownie za chwilę."""
+        """Returns True if another refresh shortly is worthwhile."""
         self.refresh_count += 1
         try:
-            st = self.enforcer.refresh("zmiana grafu")
+            st = self.enforcer.refresh("graph changed")
         except Exception:
-            log.exception("błąd podczas odświeżania")
+            log.exception("error while refreshing")
             return False
         return bool(getattr(st, "retry_soon", False))
 
@@ -729,7 +735,7 @@ class Watcher:
         restart_at = 0.0
         dirty_since: float | None = None
         last_event = 0.0
-        next_poll = self.clock()  # od razu pierwsze odświeżenie
+        next_poll = self.clock()  # first refresh right away
         retries = 0
         try:
             while not self._stop.is_set():
@@ -743,7 +749,7 @@ class Watcher:
                     except PwError as e:
                         failures += 1
                         restart_at = now + min(60.0, 2.0 ** failures)
-                        log.warning("monitor grafu niedostępny (%s) — odpytuję co %.1f s", e, self.fallback_poll)
+                        log.warning("graph monitor unavailable (%s) — polling every %.1f s", e, self.fallback_poll)
                         proc = None
 
                 deadlines = [next_poll]
@@ -764,7 +770,7 @@ class Watcher:
                             self._kick.clear()
                             t = self.clock()
                             dirty_since = dirty_since or t
-                            last_event = t - self.debounce  # bez czekania
+                            last_event = t - self.debounce  # no waiting
                     elif key.data == "mon" and proc is not None:
                         try:
                             data = os.read(proc.stdout.fileno(), 65536)
@@ -777,7 +783,7 @@ class Watcher:
                             proc = None
                             failures = failures + 1 if t - started_at < 5.0 else 1
                             restart_at = t + min(60.0, 2.0 ** failures)
-                            log.warning("monitor grafu zakończył działanie — restart za %.0f s", restart_at - t)
+                            log.warning("graph monitor exited — restarting in %.0f s", restart_at - t)
                             dirty_since = dirty_since or t
                             last_event = t
                         elif parser is not None and parser.feed(data):

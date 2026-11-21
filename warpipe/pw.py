@@ -1,13 +1,13 @@
-"""Adapter do narzędzi PipeWire (pw-dump, pw-link).
+"""Adapter for the PipeWire tools (pw-dump, pw-link).
 
-Połączenia tworzymy i usuwamy po numerycznych id portów z pw-dump — nazwy
-„węzeł:port” nie są unikalne (np. kilka węzłów discord_capture).
+Links are created and removed by the numeric port ids from pw-dump — "node:port"
+names are not unique (e.g. several discord_capture nodes).
 
-pw-link -L (linger) jest domyślne: połączenie żyje dalej po zakończeniu pw-link
-i znika samo, gdy zniknie którykolwiek z portów. Nasze połączenia znakujemy
-właściwością MANAGED_KEY (pw-link -p), żeby dało się je później znaleźć.
-Odtworzone oryginały (z migawki) dostają RESTORED_KEY — przywracanie ich nie
-usuwa, ale wiemy, że to my je utworzyliśmy.
+pw-link -L (linger) is the default: the link outlives pw-link and disappears by
+itself when either port goes away. Our links are marked with the MANAGED_KEY
+property (pw-link -p) so they can be found later. Recreated originals (from the
+snapshot) get RESTORED_KEY instead — restore does not remove them, but we know
+we created them.
 """
 
 from __future__ import annotations
@@ -17,10 +17,11 @@ import subprocess
 from typing import Any
 
 from .graph import MANAGED_KEY, RESTORED_KEY
+from .i18n import _
 
 
 class PwError(Exception):
-    """Błąd narzędzi PipeWire. Komunikat jest po polsku, dla użytkownika."""
+    """Error from the PipeWire tools. The message is user-facing (translated)."""
 
 
 def _short(text: str, limit: int = 300) -> str:
@@ -40,31 +41,34 @@ class PwCli:
                 timeout=timeout or self.timeout, check=False,
             )
         except FileNotFoundError as e:
-            raise PwError(f"Nie znaleziono programu {args[0]} — czy PipeWire (pipewire-utils) jest zainstalowany?") from e
+            raise PwError(_("Program {program} not found — are the PipeWire tools (pipewire-utils) installed?")
+                          .format(program=args[0])) from e
         except subprocess.TimeoutExpired as e:
-            raise PwError(f"{args[0]} nie odpowiedział w {timeout or self.timeout:.0f} s — czy PipeWire działa?") from e
+            raise PwError(_("{program} did not answer within {seconds:.0f} s — is PipeWire running?")
+                          .format(program=args[0], seconds=timeout or self.timeout)) from e
         except OSError as e:
-            raise PwError(f"Nie mogę uruchomić {args[0]}: {e}") from e
+            raise PwError(_("Can't run {program}: {error}").format(program=args[0], error=e)) from e
 
-    # ------------------------------------------------------------------ odczyt
+    # ------------------------------------------------------------------ reading
     def dump(self) -> list[dict]:
         r = self._run(["pw-dump", "-N"])
         if r.returncode != 0:
-            raise PwError(f"Nie mogę odczytać stanu PipeWire (pw-dump, kod {r.returncode}): {_short(r.stderr)}")
+            raise PwError(_("Can't read the PipeWire state (pw-dump, exit code {code}): {details}")
+                          .format(code=r.returncode, details=_short(r.stderr)))
         try:
             data = json.loads(r.stdout)
         except json.JSONDecodeError as e:
-            raise PwError("pw-dump zwrócił niepoprawne dane — czy PipeWire działa?") from e
+            raise PwError(_("pw-dump returned invalid data — is PipeWire running?")) from e
         if not isinstance(data, list):
-            raise PwError("pw-dump zwrócił nieoczekiwany format danych.")
+            raise PwError(_("pw-dump returned data in an unexpected format."))
         return data
 
-    # ------------------------------------------------------------------ zmiany
+    # ------------------------------------------------------------------ changes
     def link(self, out_port: int, in_port: int, managed: bool = True) -> str:
-        """Tworzy połączenie. Zwraca 'created' albo 'exists'.
+        """Create a link. Returns 'created' or 'exists'.
 
-        managed=True: nasze dodatkowe połączenie (usuwane przy przywracaniu);
-        managed=False: odtworzony oryginał (zostaje po przywróceniu)."""
+        managed=True: our extra link (removed on restore);
+        managed=False: a recreated original (kept after restore)."""
         args = ["pw-link", "-L"]
         key = MANAGED_KEY if managed else RESTORED_KEY
         args += ["-p", json.dumps({key: self.owner_value})]
@@ -74,21 +78,23 @@ class PwCli:
             return "created"
         if "File exists" in (r.stderr or "") or "File exists" in (r.stdout or ""):
             return "exists"
-        raise PwError(f"pw-link nie połączył portów {out_port} -> {in_port}: {_short(r.stderr or r.stdout)}")
+        raise PwError(_("pw-link failed to link ports {src} -> {dst}: {details}")
+                      .format(src=out_port, dst=in_port, details=_short(r.stderr or r.stdout)))
 
     def unlink(self, out_port: int, in_port: int) -> str:
-        """Usuwa połączenie między dwoma portami. Zwraca 'deleted' albo 'missing'."""
+        """Remove the link between two ports. Returns 'deleted' or 'missing'."""
         r = self._run(["pw-link", "-d", str(int(out_port)), str(int(in_port))])
         if r.returncode == 0:
             return "deleted"
         err = (r.stderr or "") + (r.stdout or "")
         if "No such file" in err or "not found" in err.lower():
             return "missing"
-        raise PwError(f"pw-link nie rozłączył portów {out_port} -> {in_port}: {_short(err)}")
+        raise PwError(_("pw-link failed to unlink ports {src} -> {dst}: {details}")
+                      .format(src=out_port, dst=in_port, details=_short(err)))
 
     # ---------------------------------------------------------------- monitor
     def start_monitor(self) -> Any:
-        """Uruchamia `pw-dump -m -N` (strumień JSON ze zmianami grafu)."""
+        """Start `pw-dump -m -N` (a JSON stream of graph changes)."""
         try:
             return subprocess.Popen(
                 ["pw-dump", "-m", "-N"],
@@ -96,4 +102,4 @@ class PwCli:
                 bufsize=0,
             )
         except (FileNotFoundError, OSError) as e:
-            raise PwError(f"Nie mogę uruchomić pw-dump -m: {e}") from e
+            raise PwError(_("Can't run pw-dump -m: {error}").format(error=e)) from e

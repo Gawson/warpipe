@@ -1,15 +1,15 @@
-"""Proces wtyczki: WebSocket do OpenDeck (SDK Stream Decka v2) + gniazdo sterowania narzędzia.
+"""Plugin process: WebSocket to OpenDeck (Stream Deck SDK v2) + the tool's control socket.
 
-OpenDeck uruchamia wtyczkę jako zwykły program (w katalogu wtyczki):
+OpenDeck starts the plugin as a plain program (in the plugin directory):
   warpipe-plugin -port P -pluginUUID U -registerEvent registerPlugin -info JSON
-Wtyczka łączy się z ws://127.0.0.1:P, wysyła {"event": "registerPlugin", "uuid": U}
-i dostaje zdarzenia (willAppear, keyDown, sendToPlugin, ...).
+The plugin connects to ws://127.0.0.1:P, sends {"event": "registerPlugin", "uuid": U}
+and receives events (willAppear, keyDown, sendToPlugin, ...).
 
-Z narzędziem (ikona w zasobniku albo --watch) rozmawia przez
-$XDG_RUNTIME_DIR/warpipe/control.sock: subskrybuje stan i wysyła tylko
-„toggle <aplikacja>” albo „system”. Połączeń PipeWire wtyczka nie zmienia nigdy.
+It talks to the tool (tray icon or --watch) over
+$XDG_RUNTIME_DIR/warpipe/control.sock: subscribes to the state and only sends
+"toggle <app>" or "system". The plugin never changes PipeWire links itself.
 
-Gdy OpenDeck zamknie połączenie, wtyczka kończy działanie.
+When OpenDeck closes the connection, the plugin exits.
 """
 
 from __future__ import annotations
@@ -32,8 +32,8 @@ from PySide6.QtWebSockets import QWebSocket
 from . import __version__
 from .logic import (ACTION_APP, ACTION_SYSTEM, apps_for_pi, child_env,
                     control_socket_path, normalize_status, press_for,
-                    resolve_tool, sanitize_global_settings, sanitize_settings,
-                    visual_for)
+                    resolve_language, resolve_tool, sanitize_global_settings,
+                    sanitize_settings, set_language, tr, visual_for)
 from .render import Renderer
 
 log = logging.getLogger("warpipe_plugin")
@@ -49,7 +49,7 @@ FIRST_STATUS_WAIT_MS = 1500
 
 
 class ControlClient(QObject):
-    """Połączenie z narzędziem. status(None) = narzędzie nie działa."""
+    """Connection to the tool. status(None) = the tool is not running."""
 
     status = Signal(object)
     reply = Signal(object)
@@ -58,7 +58,7 @@ class ControlClient(QObject):
         super().__init__()
         self.path = path
         self.retry_ms = retry_ms
-        self.up: bool | None = None       # None = jeszcze nie wiadomo
+        self.up: bool | None = None       # None = not known yet
         self._buf = b""
         self.sock = QLocalSocket(self)
         self.sock.connected.connect(self._on_connected)
@@ -99,12 +99,12 @@ class ControlClient(QObject):
         return True
 
     def _on_connected(self) -> None:
-        log.info("połączono z narzędziem (%s)", self.path)
+        log.info("connected to the tool (%s)", self.path)
         self.send({"cmd": "subscribe", "id": "sub"})
 
     def _on_disconnected(self) -> None:
         if self.up:
-            log.info("narzędzie rozłączyło się")
+            log.info("the tool disconnected")
         self._mark_down()
 
     def _on_error(self, _err) -> None:
@@ -118,14 +118,14 @@ class ControlClient(QObject):
             line, self._buf = self._buf.split(b"\n", 1)
             self._handle_line(line)
         if len(self._buf) > MAX_CTL_BUFFER:
-            log.warning("za długa wiadomość od narzędzia — rozłączam")
+            log.warning("message from the tool too long — disconnecting")
             self.sock.abort()
 
     def _handle_line(self, line: bytes) -> None:
         try:
             msg = json.loads(line.decode("utf-8"))
         except ValueError:
-            log.warning("niepoprawna wiadomość od narzędzia")
+            log.warning("invalid message from the tool")
             return
         if not isinstance(msg, dict):
             return
@@ -146,6 +146,9 @@ class Plugin(QObject):
         self.uuid = uuid
         self.register_event = register_event or "registerPlugin"
         self.env = dict(os.environ if env is None else env)
+        # Same language choice as the tool (WARPIPE_LANG, its config, the locale);
+        # resolved once at start-up, also passed to the property inspector.
+        self.lang = set_language(resolve_language(self.env))
         self.quit_cb = quit_cb or (lambda code=0: QGuiApplication.exit(code))
         self.contexts: dict[str, dict] = {}
         self.pi_visible: set[str] = set()
@@ -189,7 +192,7 @@ class Plugin(QObject):
     def starting(self) -> bool:
         return not self.tool_running and time.monotonic() < self.starting_until
 
-    # ------------------------------------------------------------- wysyłanie
+    # ------------------------------------------------------------- sending
     def _send(self, obj: dict) -> None:
         self.ws.sendTextMessage(json.dumps(obj, ensure_ascii=False))
 
@@ -222,7 +225,7 @@ class Plugin(QObject):
         self._send({"event": "sendToPropertyInspector", "context": ctx, "action": c["action"],
                     "payload": apps_for_pi(self.status, self.tool_running, c["settings"])})
 
-    # ------------------------------------------------------------- narzędzie
+    # ------------------------------------------------------------- the tool
     def _mark_known(self) -> None:
         if not self.ctl_known:
             self.ctl_known = True
@@ -244,12 +247,12 @@ class Plugin(QObject):
         rid = msg.get("id")
         ctx = self._pending.pop(rid, None) if isinstance(rid, str) else None
         if not msg.get("ok"):
-            err = msg.get("error") or "nieznany błąd"
+            err = msg.get("error") or tr("unknown error")
             if ctx is not None:
                 self.show_alert(ctx)
-            self.log_message(f"narzędzie zgłosiło błąd: {err}")
+            self.log_message(tr("Warpipe reported an error: {error}").format(error=err))
         elif msg.get("message"):
-            log.info("narzędzie: %s", msg["message"])
+            log.info("tool: %s", msg["message"])
 
     def _command(self, cmd: dict, ctx: str) -> None:
         rid = f"p{self._next_id}"
@@ -257,7 +260,7 @@ class Plugin(QObject):
         cmd = dict(cmd, id=rid)
         if not self.ctl.send(cmd):
             self.show_alert(ctx)
-            self.log_message("brak połączenia z narzędziem")
+            self.log_message(tr("not connected to Warpipe"))
             return
         self._pending[rid] = ctx
         if len(self._pending) > 100:
@@ -284,11 +287,11 @@ class Plugin(QObject):
                 cwd=self.env.get("HOME") or os.path.expanduser("~"), env=child_env(self.env))
         except OSError as e:
             self.show_alert(ctx)
-            self.log_message(f"nie udało się uruchomić {argv[0]}: {e}")
+            self.log_message(tr("failed to start {program}: {error}").format(program=argv[0], error=e))
             return
-        # zbieramy status zakończenia w tle (bez zombie), proces działa w osobnej sesji
+        # reap the exit status in the background (no zombie); the process runs in its own session
         threading.Thread(target=proc.wait, name="warpipe_plugin-reaper", daemon=True).start()
-        self.log_message(f"uruchamiam narzędzie: {argv[0]} --tray")
+        self.log_message(tr("starting Warpipe: {program} --tray").format(program=argv[0]))
         self.starting_until = now + STARTING_S
         self._starting_timer.start(int(STARTING_S * 1000) + 50)
         self.ctl.retry_ms = RETRY_STARTING_MS
@@ -300,16 +303,16 @@ class Plugin(QObject):
         self._ws_was_connected = True
         self._send({"event": self.register_event, "uuid": self.uuid})
         self._send({"event": "getGlobalSettings", "context": self.uuid})
-        log.info("zarejestrowano w OpenDeck jako %s (wtyczka %s)", self.uuid, __version__)
+        log.info("registered with OpenDeck as %s (plugin %s, language %s)", self.uuid, __version__, self.lang)
 
     def _on_ws_disconnected(self) -> None:
-        log.info("OpenDeck zamknął połączenie — kończę")
+        log.info("OpenDeck closed the connection — exiting")
         self.quit_cb(0)
 
     def _on_ws_error(self, _err=None) -> None:
         from PySide6.QtNetwork import QAbstractSocket
         if self.ws.state() == QAbstractSocket.SocketState.UnconnectedState and not self._ws_was_connected:
-            log.error("nie mogę połączyć się z OpenDeck (port %s): %s", self.port, self.ws.errorString())
+            log.error("can't connect to OpenDeck (port %s): %s", self.port, self.ws.errorString())
             self.quit_cb(1)
 
     def _ensure_ctx(self, ctx: str, action: str, settings=None) -> dict:
@@ -325,7 +328,7 @@ class Plugin(QObject):
         try:
             self._dispatch(text)
         except Exception:
-            log.exception("błąd obsługi zdarzenia")
+            log.exception("error while handling an event")
 
     def _dispatch(self, text: str) -> None:
         try:
@@ -374,9 +377,9 @@ class Plugin(QObject):
 
     def _press(self, ctx: str, c: dict) -> None:
         if not self.ctl_known:
-            # pierwsze ułamki sekundy po starcie: jeszcze nie wiemy, czy narzędzie działa —
-            # nie uruchamiamy go „na ślepo” (mogłaby wyskoczyć druga instancja)
-            log.info("naciśnięcie zignorowane: jeszcze sprawdzam, czy narzędzie działa")
+            # first fraction of a second after start: we don't know yet whether the tool
+            # runs — don't start it blindly (a second instance could pop up)
+            log.info("key press ignored: still checking whether the tool is running")
             return
         p = press_for(c["action"], c["settings"], self.status, self.tool_running, self.starting)
         if p.kind == "launch":
@@ -394,8 +397,8 @@ class Plugin(QObject):
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     ap = argparse.ArgumentParser(prog="warpipe-plugin", allow_abbrev=False,
-                                 description="Wtyczka OpenDeck/Stream Deck „Warpipe” "
-                                             "(uruchamiana przez OpenDeck).")
+                                 description="Warpipe OpenDeck/Stream Deck plugin "
+                                             "(started by OpenDeck).")
     ap.add_argument("-port", type=int, required=True)
     ap.add_argument("-pluginUUID", required=True)
     ap.add_argument("-registerEvent", default="registerPlugin")
@@ -405,7 +408,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 def _qpa_platform() -> str | None:
-    """Wtyczka nie pokazuje okien: offscreen (albo minimal), jeśli jest w systemie."""
+    """The plugin shows no windows: offscreen (or minimal) if available."""
     try:
         plugins = QLibraryInfo.path(QLibraryInfo.LibraryPath.PluginsPath)
     except Exception:  # pragma: no cover
@@ -424,12 +427,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         info = json.loads(args.info)
         app_info = info.get("application", {}) if isinstance(info, dict) else {}
-        log.info("start: %s %s, platforma %s", app_info.get("platform", "?"),
+        log.info("start: %s %s, platform %s", app_info.get("platform", "?"),
                  app_info.get("version", "?"), sys.platform)
     except ValueError:
         pass
-    # -platform w argv (a nie zmienna środowiska), żeby uruchamiana ikona narzędzia
-    # nie odziedziczyła „offscreen”.
+    # -platform in argv (not an environment variable), so the tray icon we may
+    # start does not inherit "offscreen".
     qargv = ["warpipe-plugin"]
     plat = _qpa_platform()
     if plat:

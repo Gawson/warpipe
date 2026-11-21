@@ -1,13 +1,13 @@
 #!/usr/bin/python3 -I
-"""Scenariusz testu na żywo: wtyczka OpenDeck ↔ narzędzie (--watch) ↔ PipeWire.
+"""Live test scenario: OpenDeck plugin <-> tool (--watch) <-> PipeWire.
 
-Uruchamiać TYLKO przez tests/live_plugin.sh (ustawia katalogi testowe, sprząta
-i sprawdza po sobie). Argument: katalog tymczasowy testu.
+Run ONLY via tests/live_plugin.sh (it sets up test directories, cleans up and
+verifies afterwards). Argument: the test's temporary directory.
 
-Tworzymy wyłącznie własne obiekty (prefiks ddp-test): null sink, atrapy aplikacji
-grające ciszę z /dev/zero, atrapy strumieni Discorda nagrywające do /dev/null.
-Narzędzie dostaje konfigurację, w której „Discord” = tylko węzły ddp-test-discord*.
-Każdy uruchomiony proces trafia do <tmp>/pids (sprzątanie w skrypcie bash).
+We create only our own objects (prefix ddp-test): a null sink, fake apps playing
+silence from /dev/zero, fake Discord streams recording to /dev/null. The tool gets
+a config in which "Discord" = only the ddp-test-discord* nodes. Every started
+process is recorded in <tmp>/pids (the bash script cleans them up).
 """
 
 from __future__ import annotations
@@ -28,10 +28,10 @@ from fake_opendeck import (ACTION_APP, ACTION_SYSTEM, FakeOpenDeck,  # noqa: E40
                            context_for, plugin_env)
 
 TMP = sys.argv[1]
-TOOL = [sys.executable, os.path.join(ROOT, "warpipe")]
+TOOL = [sys.executable, os.path.join(ROOT, "bin", "warpipe")]
 CONFIG_DIR = os.environ["DISCORD_DZWIEK_CONFIG_DIR"]
 RUN_DIR = os.environ["DISCORD_DZWIEK_RUNTIME_DIR"]
-assert CONFIG_DIR.startswith(TMP) and RUN_DIR.startswith(TMP), "katalogi narzędzia muszą być testowe"
+assert CONFIG_DIR.startswith(TMP) and RUN_DIR.startswith(TMP), "the tool directories must be test directories"
 SOCK = os.path.join(RUN_DIR, "control.sock")
 SINK = "ddp-test-sink"
 COMMON = "state.restore-props = false, state.restore-target = false"
@@ -316,8 +316,8 @@ def scenario() -> None:
     check("W1 „Cały system”: game/browser/music zielone (na streamie), nieobecna szara, system świeci",
           lambda: imgs({kg: "app:on", kb: "app:on", km: "app:on", kx: "app:absent", ks: "system:sys_on"}))
     img = od.last_image(kx)
-    check("W1 nieobecna: podpis = nazwa, plakietka „brak”",
-          img and img["label"] == "ddp-test-nieobecna" and img["badge"] == "brak")
+    check("W1 absent: caption = name, badge \"not playing\"",
+          img and img["label"] == "ddp-test-nieobecna" and img["badge"] == "not playing")
 
     # ------------------------------------------------------------ naciśnięcia → prawdziwe połączenia
     od.key_down(kg, ACTION_APP, keys[kg])
@@ -421,7 +421,7 @@ def scenario() -> None:
         f.write("#!/bin/sh\n"
                 f'echo "$@" > "{args_file}"\n'
                 f'echo "$$ relaunched-watch" >> "{TMP}/pids"\n'
-                f'exec "{sys.executable}" "{os.path.join(ROOT, "warpipe")}" --watch -v '
+                f'exec "{sys.executable}" "{os.path.join(ROOT, "bin", "warpipe")}" --watch -v '
                 f'>> "{TMP}/watch2.log" 2>&1\n')
     os.chmod(launcher, 0o755)
     od.did_receive_global_settings({"toolPath": launcher})

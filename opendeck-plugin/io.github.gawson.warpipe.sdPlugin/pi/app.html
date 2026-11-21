@@ -1,48 +1,47 @@
 <!DOCTYPE html>
-<html lang="pl">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Dźwięk z aplikacji</title>
+  <title data-i18n="title">App audio</title>
   <link rel="stylesheet" href="app.css">
 </head>
 <body>
   <div class="row">
-    <label for="app-select">Aplikacja</label>
+    <label for="app-select" data-i18n="app">App</label>
     <div class="field">
-      <select id="app-select"><option value="">— chwileczkę… —</option></select>
-      <button id="refresh" type="button" title="Odśwież listę">↻</button>
+      <select id="app-select"><option value="">— one moment… —</option></select>
+      <button id="refresh" type="button" title="Refresh the list" data-i18n-title="refresh">↻</button>
     </div>
   </div>
   <div class="row">
-    <label for="app-key">albo wpisz nazwę</label>
+    <label for="app-key" data-i18n="orType">or type a name</label>
     <div class="field">
       <input id="app-key" type="text" maxlength="200" autocomplete="off" spellcheck="false"
-             placeholder="np. Warframe.x64.exe (gdy teraz nie gra)">
+             placeholder="e.g. Warframe.x64.exe (when not playing)" data-i18n-placeholder="keyPlaceholder">
     </div>
   </div>
   <div class="row">
-    <label for="label">Podpis na przycisku</label>
+    <label for="label" data-i18n="keyLabel">Key label</label>
     <div class="field">
-      <input id="label" type="text" maxlength="60" autocomplete="off" placeholder="(opcjonalnie) np. Warframe">
+      <input id="label" type="text" maxlength="60" autocomplete="off"
+             placeholder="(optional) e.g. Warframe" data-i18n-placeholder="labelPlaceholder">
     </div>
   </div>
-  <p id="status" class="hint">Łączę się z wtyczką…</p>
-  <p class="hint">
-    Naciśnięcie przycisku dodaje albo zabiera dźwięk tej aplikacji ze streamu w Discordzie.
-    Zielony przycisk = aplikacja jest teraz na streamie. Szary = aplikacja teraz nie gra.
-  </p>
+  <p id="status" class="hint">Connecting to the plugin…</p>
+  <p class="hint" data-i18n="help">Pressing the key adds or removes this app's audio from your Discord stream.
+    Green = the app is on stream now. Grey = the app is not playing.</p>
   <details>
-    <summary>Zaawansowane</summary>
+    <summary data-i18n="advanced">Advanced</summary>
     <div class="row">
-      <label for="tool-path">Program warpipe</label>
+      <label for="tool-path" data-i18n="toolPath">warpipe program</label>
       <div class="field">
         <input id="tool-path" type="text" maxlength="4096" autocomplete="off" spellcheck="false"
-               placeholder="(puste = znajdź sam)">
+               placeholder="(empty = find it automatically)" data-i18n-placeholder="toolPlaceholder">
       </div>
     </div>
-    <p class="hint">Pełna ścieżka, np. ~/.local/bin/warpipe. Potrzebne tylko wtedy,
-      gdy wtyczka nie umie sama uruchomić programu.</p>
+    <p class="hint" data-i18n="toolHelp">Full path, e.g. ~/.local/bin/warpipe. Only needed when
+      the plugin can't start the program by itself.</p>
   </details>
   <script src="app.js"></script>
 </body>

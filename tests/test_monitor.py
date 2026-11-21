@@ -1,3 +1,5 @@
+"""pw-dump --monitor parsing and the Watcher loop (debounce, restarts, fallback polling)."""
+
 import json
 import os
 import threading

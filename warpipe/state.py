@@ -1,11 +1,11 @@
-"""Konfiguracja, migawka połączeń i blokada pojedynczej instancji.
+"""Config, link snapshot and the single-instance lock.
 
-Konfiguracja: ~/.config/warpipe/config.json (albo $DISCORD_DZWIEK_CONFIG_DIR).
-Migawka i blokada: $XDG_RUNTIME_DIR/warpipe/ (albo $DISCORD_DZWIEK_RUNTIME_DIR).
-Migawka leży w katalogu runtime (tmpfs), bo dotyczy bieżącego grafu PipeWire —
-po wylogowaniu i tak traci sens.
+Config: ~/.config/warpipe/config.json (or $DISCORD_DZWIEK_CONFIG_DIR).
+Snapshot and lock: $XDG_RUNTIME_DIR/warpipe/ (or $DISCORD_DZWIEK_RUNTIME_DIR).
+The snapshot lives in the runtime directory (tmpfs) because it describes the
+current PipeWire graph — it is meaningless after logging out anyway.
 
-Nigdy nie zapisujemy tu media.name (tytuły kart/utworów mogą być prywatne).
+media.name is never stored here (tab/track titles may be private).
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ import tempfile
 from pathlib import Path
 from typing import Iterable
 
+from .i18n import _
 from .planner import (DEFAULT_CAPTURE_NAMES, DEFAULT_MATCH_TERMS,
                       DEFAULT_MIC_NAMES, DetectConfig)
 
@@ -65,7 +66,7 @@ def _str_list(value, default: Iterable[str]) -> tuple[str, ...]:
 
 
 class Config:
-    """Ustawienia użytkownika. Klucze nieznane są zachowywane przy zapisie."""
+    """User settings. Unknown keys are kept when saving."""
 
     def __init__(self, path: Path | None = None) -> None:
         self.path = path or (config_dir() / "config.json")
@@ -82,18 +83,18 @@ class Config:
                 self.raw = data
             else:
                 self.raw = {}
-                self.load_error = f"{self.path}: zły format (oczekiwany obiekt JSON)"
+                self.load_error = _("{path}: invalid format (a JSON object was expected)").format(path=self.path)
         except FileNotFoundError:
             self.raw = {}
-        except (OSError, ValueError) as e:  # ValueError: też UnicodeDecodeError i JSONDecodeError
+        except (OSError, ValueError) as e:  # ValueError: also UnicodeDecodeError and JSONDecodeError
             self.raw = {}
-            self.load_error = f"Nie mogę odczytać {self.path}: {e}"
+            self.load_error = _("Can't read {path}: {error}").format(path=self.path, error=e)
 
     def save(self) -> None:
         self.raw["version"] = CONFIG_VERSION
         _atomic_write_json(self.path, self.raw)
 
-    # --------------------------------------------------------------- pola
+    # --------------------------------------------------------------- fields
     @property
     def selected_apps(self) -> list[str]:
         v = self.raw.get("selected_apps")
@@ -111,7 +112,7 @@ class Config:
 
     @property
     def enforce(self) -> bool:
-        # Tylko prawdziwe true/false z JSON-a; "false" (tekst) to NIE włączone.
+        # Only real JSON true/false; "false" (a string) does NOT mean enabled.
         v = self.raw.get("enforce", False)
         return v if isinstance(v, bool) else False
 
@@ -120,8 +121,14 @@ class Config:
         self.raw["enforce"] = bool(value)
 
     @property
+    def language(self) -> str:
+        """UI language setting: "auto" (default), "en" or "pl" (see i18n)."""
+        v = self.raw.get("language")
+        return v if isinstance(v, str) and v.strip() else "auto"
+
+    @property
     def confirmed_captures(self) -> list[tuple[str, str, str]]:
-        """Strumienie „z monitora” potwierdzone przez użytkownika jako dźwięk streamu."""
+        """"Monitor-only" streams confirmed by the user as stream audio."""
         v = self.raw.get("confirmed_captures")
         out: list[tuple[str, str, str]] = []
         if isinstance(v, list):
@@ -158,8 +165,8 @@ def _empty_snapshot(instance: str | None = None) -> dict:
 
 
 def _sanitize_snapshot(d) -> dict:
-    """Tylko poprawny kształt: captures = {"<serial>": {"node_name": str, "links": [dict, ...]}}.
-    Złe wpisy są pomijane (nie mogą wywrócić przywracania ani pilnowania)."""
+    """Only the valid shape: captures = {"<serial>": {"node_name": str, "links": [dict, ...]}}.
+    Bad entries are skipped (they must not break restore or enforcement)."""
     if not isinstance(d, dict):
         return _empty_snapshot()
     inst = d.get("pw_instance")
@@ -180,15 +187,15 @@ def _sanitize_snapshot(d) -> dict:
 
 
 class SnapshotStore:
-    """Migawka połączeń wchodzących do węzłów przechwytujących (klucz: object.serial węzła).
+    """Snapshot of the links going into capture nodes (key: the node's object.serial).
 
     Format:
-      {"version": 2, "pw_instance": "<cookie:pid demona>",
-       "captures": {"<serial>": {"node_name": str, "links": [wpis, ...]}}}
-    Wpis (planner.link_entry): serial portów/węzłów, nazwy węzłów i portów,
-    "deleted": czy to my go usunęliśmy (tylko takie odtwarzamy przy przywracaniu).
-    pw_instance: serial to licznik demona PipeWire — po jego restarcie migawka
-    jest bezwartościowa (i niebezpieczna), więc jest wtedy odrzucana w całości.
+      {"version": 2, "pw_instance": "<daemon cookie:pid>",
+       "captures": {"<serial>": {"node_name": str, "links": [entry, ...]}}}
+    Entry (planner.link_entry): port/node serials, node and port names,
+    "deleted": whether we removed it (only those are recreated on restore).
+    pw_instance: serial is a PipeWire daemon counter — after a daemon restart the
+    snapshot is worthless (and dangerous), so it is then discarded entirely.
     """
 
     def __init__(self, path: Path | None = None) -> None:
@@ -205,19 +212,19 @@ class SnapshotStore:
             self.data = _sanitize_snapshot(d)
         except FileNotFoundError:
             self.data = _empty_snapshot()
-        except (OSError, ValueError) as e:  # ValueError: też UnicodeDecodeError i JSONDecodeError
+        except (OSError, ValueError) as e:  # ValueError: also UnicodeDecodeError and JSONDecodeError
             self.data = _empty_snapshot()
-            self.load_error = f"Nie mogę odczytać migawki {self.path}: {e}"
+            self.load_error = _("Can't read the snapshot {path}: {error}").format(path=self.path, error=e)
 
     @property
     def instance(self) -> str | None:
         return self.data.get("pw_instance")
 
     def check_instance(self, instance: str | None) -> bool:
-        """Wiąże migawkę z bieżącym uruchomieniem PipeWire.
+        """Bind the snapshot to the current PipeWire session.
 
-        Zwraca True, jeśli migawka była z innego uruchomienia i została odrzucona
-        (wtedy trzeba ją zapisać, żeby skasować plik)."""
+        Returns True if the snapshot was from another session and was discarded
+        (then it has to be saved, to delete the file)."""
         if self.data.get("pw_instance") == instance:
             return False
         had = bool(self.captures)
@@ -241,7 +248,7 @@ class SnapshotStore:
         return not any((c.get("links") for c in self.captures.values()))
 
     def ensure_capture(self, serial: int, node_name: str, entries: list[dict]) -> None:
-        """Zapisuje stan początkowy węzła, jeśli jeszcze go nie mamy."""
+        """Store the initial state of a node unless we already have it."""
         key = str(serial)
         if key in self.captures:
             return
@@ -260,7 +267,7 @@ class SnapshotStore:
         cap["links"].append(e)
 
     def mark_restored(self, serial: int, out_port_serial: int, in_port_serial: int) -> bool:
-        """Połączenie z migawki znowu istnieje (utworzone przez nas BEZ znacznika)."""
+        """A snapshot link exists again (created by us WITHOUT the marker)."""
         cap = self.captures.get(str(serial))
         if not cap:
             return False
@@ -283,7 +290,7 @@ class SnapshotStore:
 
 
 class InstanceLock:
-    """Blokada pojedynczej instancji (flock w katalogu runtime)."""
+    """Single-instance lock (flock in the runtime directory)."""
 
     def __init__(self, path: Path | None = None) -> None:
         self.path = path or (runtime_dir() / "instance.lock")

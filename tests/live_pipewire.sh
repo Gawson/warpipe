@@ -1,27 +1,29 @@
 #!/bin/bash
-# Test na żywym PipeWire (PipeWire + WirePlumber), samowystarczalny.
+# Self-contained test against a live PipeWire (PipeWire + WirePlumber).
 #
-# Zasady (twarde):
-#  - tylko WŁASNE obiekty: null sink "dd-test-sink" (pactl load-module), atrapy aplikacji
-#    (pw-cat grające CISZĘ z /dev/zero do dd-test-sink), atrapy strumieni Discorda
-#    (pw-cat --record do /dev/null); nic nie dotyka istniejących węzłów ani urządzeń;
-#  - narzędzie dostaje konfigurację testową, w której „Discord” = tylko węzły dd-test-discord*,
-#    więc nawet automatyczne wykrywanie nie zobaczy prawdziwego Discorda/Vesktopa;
-#  - przed każdą zmianą sprawdzamy, że wykryta grupa to wyłącznie węzły dd-test;
-#  - sprzątanie w trap EXIT (także przy błędzie) i weryfikacja przez pw-dump;
-#  - wszystkie atrapy mają state.restore-props/target=false, więc WirePlumber nic nie zapamiętuje
-#    (sprawdzamy sumy kontrolne ~/.local/state/wireplumber/*).
+# Hard rules:
+#  - only OUR OWN objects: null sink "dd-test-sink" (pactl load-module), fake apps
+#    (pw-cat playing SILENCE from /dev/zero into dd-test-sink), fake Discord streams
+#    (pw-cat --record to /dev/null); nothing touches existing nodes or devices;
+#  - the tool gets a test config in which "Discord" = only dd-test-discord* nodes,
+#    so even automatic detection never sees the real Discord/Vesktop;
+#  - before every change we check that the detected group consists of dd-test nodes only;
+#  - cleanup in trap EXIT (also on error), verified with pw-dump;
+#  - all fakes have state.restore-props/target=false, so WirePlumber remembers nothing
+#    (checksums of ~/.local/state/wireplumber/* are compared).
 #
-# Wynik: linie PASS:/FAIL:/INFO:, na końcu podsumowanie; kod wyjścia 0 = wszystko PASS.
+# Output: PASS:/FAIL:/INFO: lines and a summary; exit code 0 = everything passed.
+# (Check descriptions below are still partly in Polish.)
 
 set -u
 HERE=$(cd "$(dirname "$0")/.." && pwd)
-TOOL=(timeout 25 python3 "$HERE/warpipe")
+TOOL=(timeout 25 python3 "$HERE/bin/warpipe")
 BASE_TMP=${WARPIPE_TEST_TMP:-${XDG_RUNTIME_DIR:-/tmp}}
 mkdir -p "$BASE_TMP"
 TMP=$(mktemp -d "$BASE_TMP/dd-live.XXXXXX")
 export DISCORD_DZWIEK_CONFIG_DIR="$TMP/config"
 export DISCORD_DZWIEK_RUNTIME_DIR="$TMP/run"
+export WARPIPE_LANG=en   # the checks below grep English output
 mkdir -p "$DISCORD_DZWIEK_CONFIG_DIR" "$DISCORD_DZWIEK_RUNTIME_DIR"
 
 SINK=dd-test-sink
@@ -340,7 +342,7 @@ check "A1 aplikacje: game/browser/mono na liście, bez atrap Discorda" \
 
 BEFORE_A1=$(q inbound "$A1"); BEFORE_A2=$(q inbound "$A2")
 "${TOOL[@]}" --apply dd-test-game --dry-run > "$TMP/dry.out" 2>&1
-check "A2 --dry-run: kod 0, plan pokazuje rozłączenie browser" grep -q "rozłącz.*dd-test-browser" "$TMP/dry.out"
+check "A2 --dry-run: kod 0, plan pokazuje rozłączenie browser" grep -q "unlink.*dd-test-browser" "$TMP/dry.out"
 check "A2 --dry-run: graf bez zmian" test "$(q inbound "$A1")|$(q inbound "$A2")" = "$BEFORE_A1|$BEFORE_A2"
 
 safe_guard
@@ -395,7 +397,7 @@ check "A6 ponowne odznaczenie: capA2 <- nic" test -z "$(q inbound "$A2")"
 check "A6 drugi cykl --restore: capA2 <- browser" test "$(q inbound "$A2")" = "$BEFORE_A2"
 "${TOOL[@]}" --restore > "$TMP/restore3.out" 2>&1; rc=$?
 check "A6 --restore drugi raz: bez zmian (0/0)" \
-    sh -c "test $rc -eq 0 && grep -q 'przywrócono 0, usunięto 0' '$TMP/restore3.out'"
+    sh -c "test $rc -eq 0 && grep -q 'restored 0, removed 0' '$TMP/restore3.out'"
 check "A6 stan jak na początku: capA1/capA2, brak naszych" \
     test "$(q inbound "$A1")|$(q inbound "$A2")|$(q managed)" = "$BEFORE_A1|$BEFORE_A2|0"
 info "odtworzone oryginały (znacznik restored): $(q restored)"
@@ -458,7 +460,7 @@ kill_pid "${PID_OF[capB2]}"; unset 'PID_OF[capB2]'; q wait-gone "$B2" 5
 # ================================================================ W: --watch
 echo "--- W: pilnowanie (--watch)"
 safe_guard
-python3 "$HERE/warpipe" --watch --apply dd-test-game > "$TMP/watch.log" 2>&1 &
+python3 "$HERE/bin/warpipe" --watch --apply dd-test-game > "$TMP/watch.log" 2>&1 &
 WATCH_PID=$!
 check "W1 --watch: capB <- tylko game w ciągu 3 s" q wait-inbound "$B" "dd-test-game" 3
 link_monitor_to "$SINK_ID" "$B"   # „Discord” podłącza monitor ponownie

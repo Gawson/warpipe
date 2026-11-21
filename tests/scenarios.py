@@ -1,4 +1,4 @@
-"""Syntetyczne grafy podobne do typowego pulpitu KDE (EasyEffects, Discord flatpak)."""
+"""Synthetic graphs resembling a typical KDE desktop (EasyEffects, Discord flatpak)."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Kanał sterowania (control.sock): protokół, zasady przełączania, stan, gniazdo."""
+"""Control channel (control.sock): protocol, toggle rules, state, socket."""
 
 import contextlib
 import io
@@ -75,11 +75,11 @@ class TestParse(unittest.TestCase):
             with self.assertRaises(ProtocolError, msg=line[:60]):
                 parse_request(line)
 
-    def test_unknown_command_keeps_id_and_is_polish(self):
+    def test_unknown_command_keeps_id_and_is_readable(self):
         with self.assertRaises(ProtocolError) as cm:
             parse_request(b'{"cmd":"exec","id":3}')
         self.assertEqual(cm.exception.rid, 3)
-        self.assertIn("nieznane polecenie", str(cm.exception))
+        self.assertIn("unknown command", str(cm.exception))
 
 
 class Base(unittest.TestCase):
@@ -169,7 +169,7 @@ class TestToggleRules(Base):
         # „Cały system” + Warframe → pilnowanie, tylko Warframe
         r = h.handle({"cmd": "toggle", "app": "Warframe.x64.exe", "id": 1})
         self.assertTrue(r["ok"], r)
-        self.assertIn("tylko", r["message"])
+        self.assertIn("only", r["message"])
         self.assertTrue(enf.enabled)
         self.assertEqual(enf.selected, ["Warframe.x64.exe"])
         self.assertEqual(self.inbound(b, ns.cap_ff), set())
@@ -187,7 +187,7 @@ class TestToggleRules(Base):
         r = h.handle({"cmd": "toggle", "app": "Warframe.x64.exe"})
         self.assertTrue(enf.enabled)
         self.assertEqual(enf.selected, ["java"])
-        self.assertIn("Odznaczono", r["message"])
+        self.assertIn("Removed", r["message"])
         by = {a["key"]: a for a in r["status"]["apps"]}
         self.assertFalse(by["Warframe.x64.exe"]["in_stream"])
         self.assertTrue(by["java"]["in_stream"])
@@ -196,12 +196,12 @@ class TestToggleRules(Base):
         self.assertTrue(r["ok"], r)
         self.assertFalse(enf.enabled)
         self.assertEqual(enf.selected, [])
-        self.assertIn("cały dźwięk systemu", r["message"])
+        self.assertIn("all system audio", r["message"])
         self.assertEqual(b.all_link_pairs(), before)
         self.assertFalse(r["status"]["enforce"])
         self.assertEqual(self.saved()["selected_apps"], [])
         self.assertIs(self.saved()["enforce"], False)
-        self.assertIn(("restored", "Do Discorda idzie cały dźwięk systemu."), self.events)
+        self.assertIn(("restored", "All system audio goes to Discord."), self.events)
 
     def test_previous_selection_replaced_when_pressed_from_system(self):
         b, ns = per_app()
@@ -230,14 +230,14 @@ class TestToggleRules(Base):
         self.assertEqual((enf.enabled, enf.selected), (True, ["Firefox"]))
         n = len(self.fake.mutations)
         r = h.handle({"cmd": "set", "app": "Firefox", "on": True})
-        self.assertIn("Bez zmian", r["message"])
+        self.assertIn("No change", r["message"])
         self.assertEqual(len(self.fake.mutations), n)
         r = h.handle({"cmd": "set", "app": "Firefox", "on": False})
         self.assertFalse(enf.enabled)
         self.assertEqual(b.all_link_pairs(), before)
         # „off” w trybie „Cały system” niczego nie zmienia
         r = h.handle({"cmd": "set", "app": "Firefox", "on": False})
-        self.assertIn("Bez zmian", r["message"])
+        self.assertIn("No change", r["message"])
         self.assertFalse(enf.enabled)
 
     def test_system_command(self):
@@ -341,7 +341,7 @@ class TestServer(SockBase):
             self.assertIn("JSON", r["error"])
             r = self.ask(f, s, {"cmd": "shell", "id": "x"})
             self.assertEqual((r["ok"], r["id"]), (False, "x"))
-            self.assertIn("nieznane polecenie", r["error"])
+            self.assertIn("unknown command", r["error"])
             # połączenie dalej działa
             self.assertTrue(self.ask(f, s, {"cmd": "status"})["ok"])
             # za długa linia → błąd i rozłączenie
@@ -444,7 +444,7 @@ class TestServer(SockBase):
             s, f = self.connect()
             r = json.loads(f.readline())
             self.assertFalse(r["ok"])
-            self.assertIn("za dużo", r["error"])
+            self.assertIn("too many", r["error"])
             s.close()
         finally:
             for s, _ in conns:
@@ -483,7 +483,7 @@ class TestCliRemote(SockBase):
         for argv in (["--status"], ["--toggle", "Firefox"], ["--system"]):
             rc, out, err = self.run_cli(*argv)
             self.assertEqual(rc, cli.EXIT_NOT_RUNNING, argv)
-            self.assertIn("nie jest uruchomiony", err)
+            self.assertIn("is not running", err)
 
     def test_status_toggle_system(self):
         b, ns = per_app()
@@ -493,19 +493,19 @@ class TestCliRemote(SockBase):
         self.serve(enf)
         rc, out, err = self.run_cli("--status")
         self.assertEqual(rc, 0, err)
-        self.assertIn("Stream z dźwiękiem: wykryty", out)
-        self.assertIn("cały dźwięk systemu", out)
-        self.assertIn("Warframe.x64.exe  — na streamie", out)
+        self.assertIn("Discord Go Live audio: active", out)
+        self.assertIn("all system audio", out)
+        self.assertIn("Warframe.x64.exe  — on stream", out)
         rc, out, err = self.run_cli("--status", "--json")
         self.assertEqual(json.loads(out)["capture"]["status"], "active")
         rc, out, err = self.run_cli("--toggle", "Warframe.x64.exe")
         self.assertEqual(rc, 0, err)
-        self.assertIn("Do Discorda tylko: Warframe.x64.exe", out)
+        self.assertIn("To Discord only: Warframe.x64.exe", out)
         self.assertIn("[x] Warframe.x64.exe", out)
         self.assertEqual(self.inbound(b, ns.cap_ff), set())
         rc, out, err = self.run_cli("--system")
         self.assertEqual(rc, 0, err)
-        self.assertIn("cały dźwięk systemu", out)
+        self.assertIn("all system audio", out)
         self.assertEqual(b.all_link_pairs(), before)
 
     def test_usage(self):

@@ -1,12 +1,12 @@
-"""Wtyczka OpenDeck / Stream Deck „Warpipe”.
+"""Warpipe OpenDeck / Stream Deck plugin.
 
-  logic  — czysta logika (bez Qt): ustawienia, stan narzędzia → wygląd przycisku,
-           reakcja na naciśnięcie, wyszukanie programu warpipe
-  render — rysowanie przycisków (QImage/QPainter → PNG → data URL)
-  main   — proces wtyczki: WebSocket do OpenDeck + gniazdo sterowania narzędzia
+  logic  — pure logic (no Qt): settings, tool state -> key appearance, key
+           presses, finding the warpipe program, language (English / Polish)
+  render — key drawing (QImage/QPainter -> PNG -> data URL)
+  main   — plugin process: WebSocket to OpenDeck + the tool's control socket
 
-Wtyczka nigdy sama nie zmienia połączeń PipeWire. Prosi o to działające narzędzie
-(ikona w zasobniku albo --watch) przez $XDG_RUNTIME_DIR/warpipe/control.sock.
+The plugin never changes PipeWire links itself. It asks the running tool
+(tray icon or --watch) to do so via $XDG_RUNTIME_DIR/warpipe/control.sock.
 """
 
 __version__ = "1.0.0"

@@ -1,18 +1,18 @@
 #!/usr/bin/python3 -I
-"""Atrapa OpenDeck do testów wtyczki (tylko biblioteka standardowa).
+"""Fake OpenDeck for plugin tests (standard library only).
 
 FakeOpenDeck:
-  - serwer WebSocket na 127.0.0.1 (losowy port), minimalny RFC 6455 (tekst, ping, close);
-  - uruchamia wtyczkę DOKŁADNIE jak OpenDeck 2.14 (plugins/mod.rs): plik z CodePathLin
-    w katalogu wtyczki, cwd = katalog wtyczki, argumenty
-    -port P -pluginUUID <katalog>.sdPlugin -registerEvent registerPlugin -info JSON;
-  - wysyła zdarzenia w kształcie OpenDeck (willAppear, keyDown, sendToPlugin, ...);
-  - zapisuje wszystko, co wtyczka przyśle (setImage, showAlert, sendToPropertyInspector...).
+  - WebSocket server on 127.0.0.1 (random port), minimal RFC 6455 (text, ping, close);
+  - starts the plugin EXACTLY like OpenDeck 2.14 (plugins/mod.rs): the CodePathLin file
+    in the plugin directory, cwd = plugin directory, arguments
+    -port P -pluginUUID <dir>.sdPlugin -registerEvent registerPlugin -info JSON;
+  - sends OpenDeck-shaped events (willAppear, keyDown, sendToPlugin, ...);
+  - records everything the plugin sends (setImage, showAlert, sendToPropertyInspector...).
 
-FakeControlServer: atrapa gniazda sterowania narzędzia (JSON w liniach), gdy testujemy
-wtyczkę bez prawdziwego narzędzia i bez PipeWire.
+FakeControlServer: fake tool control socket (JSON lines), for testing the plugin
+without the real tool and without PipeWire.
 
-Tryb podglądu (obrazki wszystkich stanów przycisków):
+Preview mode (images of all key states):
   python3 tests/fake_opendeck.py --preview opendeck-plugin/preview
 """
 
@@ -36,11 +36,11 @@ import zlib
 HERE = os.path.dirname(os.path.realpath(__file__))
 ROOT = os.path.dirname(HERE)
 PLUGIN_DIR = os.path.join(ROOT, "opendeck-plugin", "io.github.gawson.warpipe.sdPlugin")
-PLUGIN_UUID = os.path.basename(PLUGIN_DIR)          # OpenDeck: UUID wtyczki = nazwa katalogu
+PLUGIN_UUID = os.path.basename(PLUGIN_DIR)          # OpenDeck: plugin UUID = directory name
 ACTION_APP = "io.github.gawson.warpipe.app"
 ACTION_SYSTEM = "io.github.gawson.warpipe.system"
 DEVICE = "sd-FAKE0001"
-PROFILE = "Domyślny"
+PROFILE = "Default"
 COLUMNS = 5
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 TMP_BASE = os.environ.get("WARPIPE_TEST_TMP", os.environ.get("XDG_RUNTIME_DIR", "/tmp"))
@@ -52,7 +52,7 @@ TMP_BASE = os.environ.get("WARPIPE_TEST_TMP", os.environ.get("XDG_RUNTIME_DIR", 
 
 def png_text(data: bytes) -> dict:
     if data[:8] != b"\x89PNG\r\n\x1a\n":
-        raise ValueError("to nie PNG")
+        raise ValueError("not a PNG")
     out = {}
     pos = 8
     while pos + 8 <= len(data):
@@ -105,7 +105,7 @@ class WsConn:
         while len(self.buf) < n:
             chunk = self.sock.recv(65536)
             if not chunk:
-                raise ConnectionError("koniec połączenia")
+                raise ConnectionError("connection closed")
             self.buf += chunk
         out, self.buf = self.buf[:n], self.buf[n:]
         return out
@@ -114,7 +114,7 @@ class WsConn:
         while b"\r\n\r\n" not in self.buf:
             chunk = self.sock.recv(65536)
             if not chunk:
-                raise ConnectionError("brak żądania HTTP")
+                raise ConnectionError("no HTTP request")
             self.buf += chunk
         head, self.buf = self.buf.split(b"\r\n\r\n", 1)
         key = None
@@ -138,14 +138,14 @@ class WsConn:
             head = struct.pack(">BBQ", 0x80 | opcode, 127, n)
         with self.lock:
             if self.closed:
-                raise ConnectionError("zamknięte")
+                raise ConnectionError("closed")
             self.sock.sendall(head + payload)
 
     def send_text(self, text: str) -> None:
         self._send_frame(0x1, text.encode("utf-8"))
 
     def recv_text(self) -> str | None:
-        """Następna wiadomość tekstowa; None = koniec połączenia."""
+        """Next text message; None = connection closed."""
         parts = []
         while True:
             try:
@@ -196,7 +196,7 @@ class WsConn:
 # --------------------------------------------------------------------------
 
 def context_for(pos: int) -> str:
-    """Kontekst jak w OpenDeck: <urządzenie>.<profil>.<kontroler>.<pozycja>.<indeks>"""
+    """Context like OpenDeck's: <device>.<profile>.<controller>.<position>.<index>"""
     return f"{DEVICE}.{PROFILE}.Keypad.{pos}.0"
 
 
@@ -217,7 +217,7 @@ class FakeOpenDeck:
         self._log_file = None
         threading.Thread(target=self._accept, daemon=True, name="fake-opendeck").start()
 
-    # ------------------------------------------------------------ sieć
+    # ------------------------------------------------------------ network
     def _accept(self) -> None:
         while True:
             try:
@@ -262,10 +262,10 @@ class FakeOpenDeck:
 
     def send(self, obj: dict) -> None:
         if self.conn is None:
-            raise RuntimeError("wtyczka nie jest zarejestrowana")
+            raise RuntimeError("the plugin has not registered")
         self.conn.send_text(json.dumps(obj, ensure_ascii=False))
 
-    # ------------------------------------------------------------ wtyczka
+    # ------------------------------------------------------------ plugin
     def launch(self, plugin_dir: str = PLUGIN_DIR, env: dict | None = None, log_path: str | None = None,
                uuid: str | None = None) -> subprocess.Popen:
         with open(os.path.join(plugin_dir, "manifest.json"), encoding="utf-8") as f:
@@ -296,7 +296,7 @@ class FakeOpenDeck:
         return m.get("uuid")
 
     def stop(self) -> int | None:
-        """Zamyka połączenie (wtyczka powinna się sama zakończyć) i sprząta."""
+        """Close the connection (the plugin should exit by itself) and clean up."""
         rc = None
         if self.conn is not None:
             self.conn.close()
@@ -360,7 +360,7 @@ class FakeOpenDeck:
         self.send({"event": "propertyInspectorDidDisappear", "action": action, "context": ctx, "device": DEVICE})
 
     def send_to_plugin(self, ctx, action, payload):
-        """Jak OpenDeck przekazujący sendToPlugin z inspektora właściwości."""
+        """Like OpenDeck forwarding sendToPlugin from the property inspector."""
         self.send({"event": "sendToPlugin", "action": action, "context": ctx, "payload": payload})
 
     # ------------------------------------------------------------ oczekiwanie / odczyt
@@ -378,8 +378,8 @@ class FakeOpenDeck:
                 left = end - time.monotonic()
                 if left <= 0:
                     tail = [m.get("event") for m in self.messages[-12:]]
-                    raise TimeoutError(f"nie doczekałem się: {what or pred} (ostatnie: {tail})\n"
-                                       f"log wtyczki:\n{self.plugin_log()[-3000:]}")
+                    raise TimeoutError(f"timed out waiting for: {what or pred} (last: {tail})\n"
+                                       f"plugin log:\n{self.plugin_log()[-3000:]}")
                 self.cond.wait(left)
 
     def found(self, pred, since: int = 0) -> list[dict]:
@@ -401,7 +401,7 @@ class FakeOpenDeck:
         return imgs[-1] if imgs else None
 
     def wait_image(self, ctx: str, state: str, timeout: float = 5.0, ring: bool | None = None) -> dict:
-        """Czeka, aż OSTATNI obrazek przycisku ma dany stan (np. "app:on")."""
+        """Wait until the LAST image of a key has the given state (e.g. "app:on")."""
         end = time.monotonic() + timeout
         while True:
             img = self.last_image(ctx)
@@ -410,18 +410,18 @@ class FakeOpenDeck:
             left = end - time.monotonic()
             if left <= 0:
                 got = (img["state"], img["ring"]) if img else None
-                raise TimeoutError(f"{ctx}: oczekiwany {state} (ring={ring}), jest {got}\n"
-                                   f"log wtyczki:\n{self.plugin_log()[-3000:]}")
+                raise TimeoutError(f"{ctx}: expected {state} (ring={ring}), got {got}\n"
+                                   f"plugin log:\n{self.plugin_log()[-3000:]}")
             with self.cond:
                 self.cond.wait(min(left, 0.2))
 
 
 # --------------------------------------------------------------------------
-# Atrapa gniazda sterowania narzędzia
+# Fake tool control socket
 # --------------------------------------------------------------------------
 
 class FakeControlServer:
-    """Odpowiada jak narzędzie: subscribe → stan; toggle/system → zapisuje polecenie."""
+    """Answers like the tool: subscribe -> status; toggle/system -> records the command."""
 
     def __init__(self, path: str, status: dict) -> None:
         self.path = path
@@ -479,7 +479,7 @@ class FakeControlServer:
                 ok = self.reply_ok
             reply = {"type": "reply", "id": req.get("id"), "ok": ok, "status": st}
             if not ok:
-                reply["error"] = "atrapa: błąd"
+                reply["error"] = "fake: error"
             if req.get("cmd") == "subscribe":
                 reply["ok"] = True
                 with self.lock:
@@ -501,7 +501,7 @@ class FakeControlServer:
                     if pred(c):
                         return c
             time.sleep(0.02)
-        raise TimeoutError(f"brak polecenia; są: {self.commands}")
+        raise TimeoutError(f"no such command; got: {self.commands}")
 
     def stop(self) -> None:
         if self.srv is not None:
@@ -545,7 +545,7 @@ def plugin_env(runtime_dir: str, extra: dict | None = None) -> dict:
 
 
 # --------------------------------------------------------------------------
-# Podgląd: obrazki wszystkich stanów
+# Preview: images of all states
 # --------------------------------------------------------------------------
 
 def preview(outdir: str) -> int:
@@ -575,43 +575,43 @@ def preview(outdir: str) -> int:
             with open(path, "wb") as f:
                 f.write(img["png"])
             saved.append((name, img))
-            print(f"  {name}.png  ({img['state']}, ramka={int(img['ring'])}, „{img['badge']}”)")
+            print(f"  {name}.png  ({img['state']}, ring={int(img['ring'])}, {img['badge']!r})")
 
-        print(f"zapisuję podgląd do {outdir}")
-        save(game, "app:down", "app-01-narzedzie-nie-dziala")
-        save(sysk, "system:down", "system-01-narzedzie-nie-dziala")
-        save(unset, "app:unset", "app-00-bez-aplikacji")
+        print(f"writing preview to {outdir}")
+        save(game, "app:down", "app-01-tool-not-running")
+        save(sysk, "system:down", "system-01-tool-not-running")
+        save(unset, "app:unset", "app-00-no-app")
         od.did_receive_global_settings({"toolPath": launcher})
         time.sleep(0.3)
         od.key_down(game, ACTION_APP, {"app": "Warframe.x64.exe"})
-        save(game, "app:starting", "app-02-uruchamiam")
+        save(game, "app:starting", "app-02-starting")
 
         ctl = FakeControlServer(sock, make_status(False, "none", [("Warframe.x64.exe", True, False, False)])).start()
-        save(game, "app:nostream", "app-03-brak-streamu", ring=False)
+        save(game, "app:nostream", "app-03-no-stream", ring=False)
         ctl.set_status(make_status(True, "none", [("Warframe.x64.exe", True, True, False)]))
-        save(game, "app:nostream", "app-04-brak-streamu-wybrana", ring=True)
+        save(game, "app:nostream", "app-04-no-stream-selected", ring=True)
         ctl.set_status(make_status(False, "active", [("Warframe.x64.exe", True, False, True)]))
-        save(game, "app:on", "app-05-na-streamie")
-        save(sysk, "system:sys_on", "system-02-caly-system-wlaczony")
+        save(game, "app:on", "app-05-on-stream")
+        save(sysk, "system:sys_on", "system-02-whole-system-on")
         ctl.set_status(make_status(True, "active", [("Warframe.x64.exe", True, False, False),
                                                     ("Firefox", True, True, True)]))
-        save(game, "app:off", "app-06-gra-nie-na-streamie", ring=False)
-        save(sysk, "system:sys_off", "system-03-tylko-wybrane")
+        save(game, "app:off", "app-06-playing-not-on-stream", ring=False)
+        save(sysk, "system:sys_off", "system-03-only-selected")
         ctl.set_status(make_status(True, "active", [("Firefox", True, True, True)]))
-        save(game, "app:absent", "app-07-nie-gra", ring=False)
+        save(game, "app:absent", "app-07-not-playing", ring=False)
         ctl.set_status(make_status(True, "active", [("Warframe.x64.exe", False, True, False)]))
-        save(game, "app:absent", "app-08-nie-gra-wybrana", ring=True)
+        save(game, "app:absent", "app-08-not-playing-selected", ring=True)
         ctl.set_status(make_status(False, "ambiguous", [("Warframe.x64.exe", True, False, False)]))
-        save(game, "app:unsure", "app-09-stream-niepewny")
-        ctl.set_status(make_status(False, "none", [], error="Nie mogę odczytać stanu PipeWire"))
-        save(game, "app:error", "app-10-blad")
+        save(game, "app:unsure", "app-09-stream-unsure")
+        ctl.set_status(make_status(False, "none", [], error="Can't read the PipeWire state"))
+        save(game, "app:error", "app-10-error")
         _contact_sheet(outdir, saved)
     finally:
         if ctl is not None:
             ctl.stop()
         rc = od.stop()
         shutil.rmtree(tmp, ignore_errors=True)
-    print(f"wtyczka zakończyła się: {rc}")
+    print(f"plugin exited: {rc}")
     return 0
 
 
@@ -643,8 +643,8 @@ def _contact_sheet(outdir: str, saved) -> None:
 
 
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description="Atrapa OpenDeck dla wtyczki Warpipe")
-    ap.add_argument("--preview", metavar="KATALOG", help="zapisz obrazki wszystkich stanów przycisków")
+    ap = argparse.ArgumentParser(description="Fake OpenDeck for the Warpipe plugin")
+    ap.add_argument("--preview", metavar="DIR", help="write images of all key states")
     args = ap.parse_args(argv)
     if args.preview:
         return preview(args.preview)

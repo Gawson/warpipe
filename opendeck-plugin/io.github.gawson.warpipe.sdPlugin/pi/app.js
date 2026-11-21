@@ -1,11 +1,15 @@
-/* Warpipe — ustawienia przycisku „Dźwięk z aplikacji” (inspektor właściwości).
+/* Warpipe — settings of the "App audio" key (property inspector).
  *
- * OpenDeck po załadowaniu tej strony woła connectOpenActionSocket(...) (jeśli istnieje)
- * albo connectElgatoStreamDeckSocket(...); oprogramowanie Elgato woła
- * connectElgatoStreamDeckSocket(...). Argumenty są te same:
- *   (port, uuid tego inspektora, "registerPropertyInspector", info JSON, actionInfo JSON)
+ * After loading this page OpenDeck calls connectOpenActionSocket(...) (if it exists)
+ * or connectElgatoStreamDeckSocket(...); the Elgato software calls
+ * connectElgatoStreamDeckSocket(...). The arguments are the same:
+ *   (port, uuid of this inspector, "registerPropertyInspector", info JSON, actionInfo JSON)
  *
- * Bez zewnętrznych bibliotek i bez internetu.
+ * Language: English by default, Polish when the plugin says so ("lang" in its
+ * "apps" payload, which follows the Warpipe setting); before that, the host's
+ * application.language is used as a first guess.
+ *
+ * No external libraries, no internet.
  */
 "use strict";
 
@@ -19,11 +23,122 @@ var DDPI = (function () {
     apps: [],
     toolRunning: null,
     capture: "",
-    enforce: false
+    enforce: false,
+    lang: "en"
   };
   var timers = {};
 
-  // ------------------------------------------------------------ czyste funkcje
+  // ------------------------------------------------------------ translations
+  var T = {
+    en: {
+      title: "App audio",
+      app: "App",
+      refresh: "Refresh the list",
+      orType: "or type a name",
+      keyPlaceholder: "e.g. Warframe.x64.exe (when not playing)",
+      keyLabel: "Key label",
+      labelPlaceholder: "(optional) e.g. Warframe",
+      connecting: "Connecting to the plugin…",
+      help: "Pressing the key adds or removes this app's audio from your Discord stream. " +
+            "Green = the app is on stream now. Grey = the app is not playing.",
+      advanced: "Advanced",
+      toolPath: "warpipe program",
+      toolPlaceholder: "(empty = find it automatically)",
+      toolHelp: "Full path, e.g. ~/.local/bin/warpipe. Only needed when the plugin can't " +
+                "start the program by itself.",
+      pick: "— pick from the list —",
+      noneNow: "— no app is playing right now —",
+      unavailable: "— list unavailable —",
+      optOnStream: "{app} — on stream",
+      optNotPlaying: "{app} (not playing now)",
+      notRunning: "Warpipe is not running. Press the key on the Stream Deck to start it " +
+                  "(or start it from the app menu).",
+      capActive: "Discord Go Live audio: active.",
+      capAmbiguous: "Discord Go Live audio: ambiguous — pick it in the Warpipe tray menu.",
+      capNone: "Discord Go Live audio: not detected. Your choice takes effect when you start " +
+               "a Go Live stream with sound.",
+      appOnStream: "{app}: on stream.",
+      appNotPlaying: "{app}: not playing now.",
+      appOff: "{app}: playing, but not going to the stream.",
+      pickApp: "Pick an app from the list.",
+      noOpenDeck: "No connection to OpenDeck."
+    },
+    pl: {
+      title: "Dźwięk z aplikacji",
+      app: "Aplikacja",
+      refresh: "Odśwież listę",
+      orType: "albo wpisz nazwę",
+      keyPlaceholder: "np. Warframe.x64.exe (gdy teraz nie gra)",
+      keyLabel: "Podpis na przycisku",
+      labelPlaceholder: "(opcjonalnie) np. Warframe",
+      connecting: "Łączę się z wtyczką…",
+      help: "Naciśnięcie przycisku dodaje albo zabiera dźwięk tej aplikacji ze streamu w Discordzie. " +
+            "Zielony przycisk = aplikacja jest teraz na streamie. Szary = aplikacja teraz nie gra.",
+      advanced: "Zaawansowane",
+      toolPath: "Program warpipe",
+      toolPlaceholder: "(puste = znajdź sam)",
+      toolHelp: "Pełna ścieżka, np. ~/.local/bin/warpipe. Potrzebne tylko wtedy, gdy wtyczka " +
+                "nie umie sama uruchomić programu.",
+      pick: "— wybierz z listy —",
+      noneNow: "— żadna aplikacja teraz nie gra —",
+      unavailable: "— lista niedostępna —",
+      optOnStream: "{app} — na streamie",
+      optNotPlaying: "{app} (teraz nie gra)",
+      notRunning: "Program „Warpipe” nie działa. Naciśnij przycisk na Stream Decku, " +
+                  "żeby go uruchomić (albo uruchom go z menu programów).",
+      capActive: "Stream z dźwiękiem: wykryty.",
+      capAmbiguous: "Stream z dźwiękiem: niepewny — wybierz go w menu ikony programu.",
+      capNone: "Stream z dźwiękiem: nie wykryty. Wybór zadziała sam, gdy zaczniesz stream z dźwiękiem.",
+      appOnStream: "{app}: na streamie.",
+      appNotPlaying: "{app}: teraz nie gra.",
+      appOff: "{app}: gra, ale nie idzie do streamu.",
+      pickApp: "Wybierz aplikację z listy.",
+      noOpenDeck: "Brak połączenia z OpenDeck."
+    }
+  };
+
+  function t(key, vars) {
+    var table = T[S.lang] || T.en;
+    var s = table.hasOwnProperty(key) ? table[key] : (T.en.hasOwnProperty(key) ? T.en[key] : key);
+    if (!vars) return s;
+    return s.replace(/\{(\w+)\}/g, function (m, k) {
+      return Object.prototype.hasOwnProperty.call(vars, k) ? String(vars[k]) : m;
+    });
+  }
+
+  // "en" / "pl", or null for "auto" / unknown input (same rules as the plugin and the tool)
+  function normLang(v) {
+    if (typeof v !== "string") return null;
+    v = v.trim().toLowerCase();
+    if (!v || v === "auto") return null;
+    return v.indexOf("pl") === 0 ? "pl" : "en";
+  }
+
+  function eachEl(selector, fn) {
+    if (typeof document === "undefined" || typeof document.querySelectorAll !== "function") return;
+    var list = document.querySelectorAll(selector);
+    for (var i = 0; i < list.length; i++) fn(list[i]);
+  }
+
+  function applyStatic() {
+    if (typeof document !== "undefined" && document.documentElement) document.documentElement.lang = S.lang;
+    eachEl("[data-i18n]", function (el) { el.textContent = t(el.getAttribute("data-i18n")); });
+    eachEl("[data-i18n-placeholder]", function (el) {
+      el.setAttribute("placeholder", t(el.getAttribute("data-i18n-placeholder")));
+    });
+    eachEl("[data-i18n-title]", function (el) { el.setAttribute("title", t(el.getAttribute("data-i18n-title"))); });
+  }
+
+  function setLang(lang) {
+    var l = normLang(lang) || "en";
+    if (l !== S.lang) {
+      S.lang = l;
+      applyStatic();
+    }
+    return S.lang;
+  }
+
+  // ------------------------------------------------------------ pure functions
   function clean(v, limit) {
     if (typeof v !== "string") return "";
     var out = "";
@@ -43,47 +158,44 @@ var DDPI = (function () {
     return null;
   }
 
-  // Lista opcji listy rozwijanej: [{value, text, selected}]
+  // Drop-down options: [{value, text, selected}]
   function buildOptions(apps, current, toolRunning) {
     var present = apps.filter(function (a) { return a.present; });
-    var first = present.length ? "— wybierz z listy —"
-      : (toolRunning ? "— żadna aplikacja teraz nie gra —" : "— lista niedostępna —");
+    var first = present.length ? t("pick") : (toolRunning ? t("noneNow") : t("unavailable"));
     var opts = [{ value: "", text: first, selected: !current }];
     present.forEach(function (a) {
+      var name = a.display || a.key;
       opts.push({
         value: a.key,
-        text: (a.display || a.key) + (a.in_stream ? " — na streamie" : ""),
+        text: a.in_stream ? t("optOnStream", { app: name }) : name,
         selected: !!current && sameKey(a.key, current)
       });
     });
     if (current && !findApp(present, current)) {
-      opts.push({ value: current, text: current + " (teraz nie gra)", selected: true });
+      opts.push({ value: current, text: t("optNotPlaying", { app: current }), selected: true });
     }
     return opts;
   }
 
   function statusLine(toolRunning, capture, apps, current) {
-    if (toolRunning === null) return { text: "Łączę się z wtyczką…", cls: "" };
-    if (!toolRunning) {
-      return { text: "Program „Warpipe” nie działa. Naciśnij przycisk na Stream Decku, " +
-                     "żeby go uruchomić (albo uruchom go z menu programów).", cls: "bad" };
-    }
-    var t, cls;
-    if (capture === "active") { t = "Stream z dźwiękiem: wykryty."; cls = "ok"; }
-    else if (capture === "ambiguous") { t = "Stream z dźwiękiem: niepewny — wybierz go w menu ikony programu."; cls = "warn"; }
-    else { t = "Stream z dźwiękiem: nie wykryty. Wybór zadziała sam, gdy zaczniesz stream z dźwiękiem."; cls = "warn"; }
+    if (toolRunning === null) return { text: t("connecting"), cls: "" };
+    if (!toolRunning) return { text: t("notRunning"), cls: "bad" };
+    var text, cls;
+    if (capture === "active") { text = t("capActive"); cls = "ok"; }
+    else if (capture === "ambiguous") { text = t("capAmbiguous"); cls = "warn"; }
+    else { text = t("capNone"); cls = "warn"; }
     if (current) {
       var a = findApp(apps, current);
-      if (!a || !a.present) t += " " + current + ": teraz nie gra.";
-      else if (a.in_stream) t += " " + current + ": na streamie.";
-      else t += " " + current + ": gra, ale nie idzie do streamu.";
+      if (!a || !a.present) text += " " + t("appNotPlaying", { app: current });
+      else if (a.in_stream) text += " " + t("appOnStream", { app: current });
+      else text += " " + t("appOff", { app: current });
     } else {
-      t += " Wybierz aplikację z listy.";
+      text += " " + t("pickApp");
     }
-    return { text: t, cls: cls };
+    return { text: text, cls: cls };
   }
 
-  // ------------------------------------------------------------ komunikacja
+  // ------------------------------------------------------------ messaging
   function send(obj) {
     if (S.ws && S.ws.readyState === 1) S.ws.send(JSON.stringify(obj));
   }
@@ -116,7 +228,7 @@ var DDPI = (function () {
     opts.forEach(function (o) {
       var el = document.createElement("option");
       el.value = o.value;
-      el.textContent = o.text;   // textContent: nazwy aplikacji nigdy jako HTML
+      el.textContent = o.text;   // textContent: app names never as HTML
       if (o.selected) el.selected = true;
       sel.appendChild(el);
     });
@@ -127,10 +239,10 @@ var DDPI = (function () {
   }
 
   function fillForm() {
-    var k = $("app-key"), l = $("label"), t = $("tool-path");
+    var k = $("app-key"), l = $("label"), tp = $("tool-path");
     if (k && document.activeElement !== k) k.value = S.settings.app || "";
     if (l && document.activeElement !== l) l.value = S.settings.label || "";
-    if (t && document.activeElement !== t) t.value = S.global.toolPath || "";
+    if (tp && document.activeElement !== tp) tp.value = S.global.toolPath || "";
     render();
   }
 
@@ -176,6 +288,7 @@ var DDPI = (function () {
     if (!msg || typeof msg !== "object") return;
     var payload = (msg.payload && typeof msg.payload === "object") ? msg.payload : {};
     if (msg.event === "sendToPropertyInspector" && payload.type === "apps") {
+      if (typeof payload.lang === "string") setLang(payload.lang);
       S.apps = Array.isArray(payload.apps) ? payload.apps.filter(function (a) {
         return a && typeof a.key === "string" && a.key;
       }) : [];
@@ -195,8 +308,12 @@ var DDPI = (function () {
   }
 
   function connect(inPort, inUUID, inRegisterEvent, inInfo, inActionInfo) {
-    if (S.ws) return;  // OpenDeck może zawołać i wersję OpenAction, i Elgato — łączymy się raz
+    if (S.ws) return;  // OpenDeck may call both the OpenAction and the Elgato variant — connect once
     S.uuid = inUUID;
+    var host = {};
+    try { host = JSON.parse(inInfo || "{}") || {}; } catch (e) { host = {}; }
+    var hostLang = host.application && host.application.language;
+    if (normLang(hostLang) === "pl") setLang("pl");   // first guess until the plugin tells us
     var info = {};
     try { info = JSON.parse(inActionInfo || "{}") || {}; } catch (e) { info = {}; }
     S.action = info.action || "io.github.gawson.warpipe.app";
@@ -213,7 +330,7 @@ var DDPI = (function () {
     S.ws.onclose = function () {
       S.toolRunning = null;
       var p = $("status");
-      if (p) { p.textContent = "Brak połączenia z OpenDeck."; p.className = "hint bad"; }
+      if (p) { p.textContent = t("noOpenDeck"); p.className = "hint bad"; }
     };
   }
 
@@ -223,6 +340,9 @@ var DDPI = (function () {
     clean: clean,
     buildOptions: buildOptions,
     statusLine: statusLine,
+    setLang: setLang,
+    t: t,
+    T: T,
     connect: connect,
     _state: S
   };

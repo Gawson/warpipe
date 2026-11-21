@@ -1,13 +1,15 @@
 [Desktop Entry]
 Type=Application
 Name=Warpipe
-Name[en]=Discord Audio Picker
-GenericName=Wybór dźwięku do streamu Discorda
-Comment=Do streamu w Discordzie trafia tylko dźwięk wybranych aplikacji
-Comment[en]=Send only selected applications' audio to Discord screen share
+Name[pl]=Warpipe
+GenericName=Stream audio picker
+GenericName[pl]=Wybór dźwięku do streamu Discorda
+Comment=Choose which apps are heard in your Discord Go Live stream
+Comment[pl]=Do streamu w Discordzie trafia tylko dźwięk wybranych aplikacji
 Exec=warpipe
-Icon=audio-volume-high
+Icon=io.github.gawson.Warpipe
 Terminal=false
 Categories=AudioVideo;Audio;Mixer;
-Keywords=discord;audio;dźwięk;stream;go live;pipewire;
+Keywords=Discord;Go Live;stream;PipeWire;audio;
+Keywords[pl]=Discord;Go Live;stream;PipeWire;audio;dźwięk;
 StartupNotify=false

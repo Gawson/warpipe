@@ -1,9 +1,8 @@
-"""Model grafu PipeWire zbudowany z listy obiektów pw-dump.
+"""PipeWire graph model built from the list of pw-dump objects.
 
-Czysty kod (bez wywołań zewnętrznych), żeby dało się go testować na zapisanych
-zrzutach. Obiekty identyfikujemy po object.serial tam, gdzie liczy się
-trwałość (serial nigdy nie jest używany ponownie), a po id tam, gdzie trzeba
-wywołać pw-link (pw-link przyjmuje id portów).
+Pure code (no external calls), so it can be tested on saved snapshots. Objects
+are identified by object.serial where persistence matters (a serial is never
+reused) and by id where pw-link has to be called (pw-link takes port ids).
 """
 
 from __future__ import annotations
@@ -17,16 +16,16 @@ T_LINK = "PipeWire:Interface:Link"
 T_CLIENT = "PipeWire:Interface:Client"
 T_CORE = "PipeWire:Interface:Core"
 
-# Klucz, którym znakujemy połączenia utworzone przez to narzędzie (pw-link -p).
-# Takie połączenia „Cały system” usuwa.
+# Property used to mark links created by this tool (pw-link -p).
+# "Whole system" removes such links.
 MANAGED_KEY = "warpipe.managed"
-# Odtworzone przez nas ORYGINALNE połączenie (z migawki). „Cały system” go nie
-# usuwa — to stan sprzed zmian; znacznik służy tylko do rozpoznania, że to my
-# je utworzyliśmy (kontrola po wykonaniu, gdy id portu zostało użyte ponownie).
+# An ORIGINAL link recreated by us (from the snapshot). "Whole system" does not
+# remove it — it is the pre-change state; the marker only tells us that we
+# created it (post-check when a port id was reused).
 RESTORED_KEY = "warpipe.restored"
 
-# Pola tożsamości aplikacji, które uzupełniamy z właściwości klienta,
-# jeśli węzeł ich nie ma (np. Minecraft/OpenAL: węzeł "java" bez application.name).
+# App identity fields filled in from the client's properties when the node
+# lacks them (e.g. Minecraft/OpenAL: a "java" node without application.name).
 CLIENT_FALLBACK_KEYS = (
     "application.name",
     "application.process.binary",
@@ -92,8 +91,8 @@ class Port:
 class Node:
     id: int
     serial: int
-    props: dict = field(repr=False)          # właściwości węzła uzupełnione o pola klienta
-    own_props: dict = field(repr=False)      # tylko właściwości węzła
+    props: dict = field(repr=False)          # node properties plus client fallback fields
+    own_props: dict = field(repr=False)      # the node's own properties only
     client_props: dict = field(repr=False)
     in_ports: list[Port] = field(default_factory=list)
     out_ports: list[Port] = field(default_factory=list)
@@ -117,15 +116,15 @@ class Node:
 
     @property
     def media_name(self) -> str | None:
-        """Tytuł strumienia (np. karta przeglądarki). Tylko do podpowiedzi w UI —
-        nigdy nie zapisywać do logów ani konfiguracji."""
+        """Stream title (e.g. a browser tab). Only for UI hints —
+        never write it to logs or the config."""
         return _nonempty_str(self.own_props.get("media.name"))
 
     @property
     def has_pid(self) -> bool:
-        """Czy SAM węzeł ma application.process.id. Discord czyta to pole z listy
-        sink-input pipewire-pulse (właściwości węzła, nie klienta); bez niego
-        strumień jest pomijany (np. Minecraft/OpenAL na natywnym PipeWire)."""
+        """Does the node ITSELF have application.process.id? Discord reads this field
+        from pipewire-pulse's sink-input list (node properties, not the client's);
+        without it the stream is skipped (e.g. Minecraft/OpenAL on native PipeWire)."""
         return self.own_props.get("application.process.id") not in (None, "")
 
     @property
@@ -141,11 +140,11 @@ class Node:
 
     @property
     def out_ports_audio(self) -> list[Port]:
-        """Wyjścia bez portów monitora (te są tylko kopią wejścia)."""
+        """Outputs without monitor ports (those are just a copy of the input)."""
         return [p for p in self.out_ports if not p.monitor]
 
     def mute_state(self) -> bool:
-        """True, jeśli węzeł jest wyciszony (Props.mute / softMute / zerowe softVolumes)."""
+        """True if the node is muted (Props.mute / softMute / all-zero softVolumes)."""
         props_list = self.params.get("Props") if isinstance(self.params, dict) else None
         if not isinstance(props_list, list):
             return False
@@ -162,7 +161,7 @@ class Node:
         return False
 
     def label(self) -> str:
-        """Bezpieczna etykieta do logów (bez media.name)."""
+        """Label safe for logs (no media.name)."""
         bits = [self.name or "?"]
         if self.binary:
             bits.append(f"[{self.binary}]")
@@ -186,16 +185,16 @@ class Link:
 
     @property
     def ours(self) -> bool:
-        """Utworzone przez to narzędzie (nasze dodatkowe albo odtworzony oryginał)."""
+        """Created by this tool (our extra link or a recreated original)."""
         return MANAGED_KEY in self.props or RESTORED_KEY in self.props
 
 
 def _instance_id(info: dict) -> str | None:
-    """Tożsamość bieżącego uruchomienia demona PipeWire (Core id 0).
+    """Identity of the current PipeWire daemon session (Core id 0).
 
-    object.serial to licznik demona — po restarcie PipeWire zaczyna się od nowa,
-    więc serial z migawki może wskazywać zupełnie inny port. cookie jest losowane
-    przy każdym starcie demona; dokładamy PID demona dla pewności.
+    object.serial is a daemon counter — it starts over after a PipeWire restart,
+    so a serial from the snapshot may point at a completely different port. The
+    cookie is random on every daemon start; the daemon PID is added to be sure.
     """
     cookie = _as_int(info.get("cookie"))
     if cookie is None:
@@ -322,7 +321,7 @@ class Graph:
         return {(l.out_port, l.in_port): l for l in self.links.values()}
 
     def resolve_target(self, value: Any) -> Node | None:
-        """Rozwiązuje target.object: liczba = object.serial (lub id), tekst = node.name/object.path."""
+        """Resolve target.object: number = object.serial (or id), text = node.name/object.path."""
         if value is None:
             return None
         num = _as_int(value)

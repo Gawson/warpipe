@@ -1,8 +1,8 @@
 #!/bin/bash
-# Buduje paczkę wtyczki dla OpenDeck („Zainstaluj z pliku”) / Stream Decka:
+# Builds the plugin package for OpenDeck ("Install from file") / Stream Deck:
 #   dist/io.github.gawson.warpipe.streamDeckPlugin
-# = zip z katalogiem io.github.gawson.warpipe.sdPlugin/ na samej górze.
-# Tylko biblioteka standardowa Pythona + systemowe PySide6 (do ikon).
+# = a zip with the io.github.gawson.warpipe.sdPlugin/ directory at the top.
+# Python standard library + system PySide6 (for the icons) only.
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 NAME=io.github.gawson.warpipe
@@ -20,19 +20,19 @@ import json, os, stat, sys, zipfile
 src, out = sys.argv[1], sys.argv[2]
 top = os.path.basename(src)
 with open(os.path.join(src, "manifest.json"), encoding="utf-8") as f:
-    manifest = json.load(f)                       # zły JSON = błąd budowania
+    manifest = json.load(f)                       # bad JSON = build error
 code = manifest["CodePathLin"]
 for k in ("Name", "Author", "Version", "Icon", "Actions", "OS"):
-    assert k in manifest, f"manifest: brak {k}"
-assert {"Platform": "linux"} in manifest["OS"], "manifest: brak OS linux"
+    assert k in manifest, f"manifest: missing {k}"
+assert {"Platform": "linux"} in manifest["OS"], "manifest: missing OS linux"
 for a in manifest["Actions"]:
     for k in ("UUID", "Name", "States"):
-        assert k in a, f"akcja bez {k}"
+        assert k in a, f"action without {k}"
     pi = a.get("PropertyInspectorPath")
-    assert not pi or os.path.isfile(os.path.join(src, pi)), f"brak {pi}"
+    assert not pi or os.path.isfile(os.path.join(src, pi)), f"missing {pi}"
     for icon in [a.get("Icon")] + [s.get("Image") for s in a["States"]]:
-        assert os.path.isfile(os.path.join(src, icon + ".png")), f"brak ikony {icon}.png"
-assert os.access(os.path.join(src, code), os.X_OK), f"{code} nie jest wykonywalny"
+        assert os.path.isfile(os.path.join(src, icon + ".png")), f"missing icon {icon}.png"
+assert os.access(os.path.join(src, code), os.X_OK), f"{code} is not executable"
 
 def skip(name):
     return name == "__pycache__" or name.endswith((".pyc", ".pyo", "~")) or name.startswith(".")
@@ -59,9 +59,9 @@ with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
             files += 1
 with zipfile.ZipFile(out) as z:
     names = z.namelist()
-    assert all(n.startswith(top + "/") for n in names), "w paczce coś poza katalogiem .sdPlugin"
+    assert all(n.startswith(top + "/") for n in names), "package contains something outside the .sdPlugin directory"
     assert f"{top}/manifest.json" in names
     exe = z.getinfo(f"{top}/{code}")
-    assert (exe.external_attr >> 16) & 0o111, "plik wtyczki bez prawa wykonania w paczce"
-print(f"{out}: {files} plików, wersja {manifest['Version']}")
+    assert (exe.external_attr >> 16) & 0o111, "plugin executable lost its exec bit in the package"
+print(f"{out}: {files} files, version {manifest['Version']}")
 PY

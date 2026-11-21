@@ -1,4 +1,4 @@
-"""Interfejs wiersza poleceń: warpipe."""
+"""Command-line interface: warpipe."""
 
 from __future__ import annotations
 
@@ -13,11 +13,12 @@ from . import APP_NAME, __version__
 from .control import ControlError, NotRunning
 from .control import request as control_request
 from .control import start_control_server
-from .enforcer import Enforcer, Watcher
+from .enforcer import Enforcer, Watcher, routing_text
 from .graph import Graph
-from .planner import (KIND_LABEL_PL, STATUS_FOUND, STATUS_LABEL_PL, Detection,
-                      app_key, detect, list_apps, plan_apply, plan_restore,
-                      snapshot_originals)
+from .i18n import N_, _, ngettext
+from .planner import (STATUS_UNKNOWN_LABEL, Detection, app_key, detect,
+                      list_apps, plan_apply, plan_restore, snapshot_originals,
+                      status_label)
 from .pw import PwCli, PwError
 from .scrub import scrub_dump
 from .state import Config, InstanceLock, SnapshotStore
@@ -31,10 +32,11 @@ EXIT_NOT_RUNNING = 5
 
 log = logging.getLogger("warpipe")
 
-CAPTURE_LABEL_PL = {
-    "active": "Stream z dźwiękiem: wykryty",
-    "none": "Stream z dźwiękiem: nie wykryty",
-    "ambiguous": "Stream z dźwiękiem: niepewny — wybierz w menu ikony",
+# Capture state as reported by a running instance (control.capture_state).
+CAPTURE_LABEL = {
+    "active": N_("Discord Go Live audio: active"),
+    "none": N_("Discord Go Live audio: not detected"),
+    "ambiguous": N_("Discord Go Live audio: ambiguous — pick one in the tray menu"),
 }
 
 
@@ -46,31 +48,41 @@ def setup_logging(verbose: bool, quiet: bool = False) -> None:
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         prog="warpipe",
-        description=f"{APP_NAME}: do dźwięku streamu w Discordzie (Go Live) trafiają tylko wybrane aplikacje.",
-        epilog="Bez argumentów (w sesji graficznej) uruchamia ikonę w zasobniku.",
+        description=_("{app}: only the apps you pick are heard in your Discord Go Live stream.")
+        .format(app=APP_NAME),
+        epilog=_("Without arguments (in a graphical session) it starts the tray icon."),
     )
-    ap.add_argument("--list", action="store_true", help="pokaż strumienie Discorda i aplikacje z dźwiękiem")
-    ap.add_argument("--json", action="store_true", help="(z --list albo --status) wynik w formacie JSON")
+    ap.add_argument("--list", action="store_true", help=_("show Discord capture streams and apps playing audio"))
+    ap.add_argument("--json", action="store_true", help=_("(with --list or --status) output JSON"))
     ap.add_argument("--status", action="store_true",
-                    help="stan DZIAŁAJĄCEJ instancji (ikona albo --watch): tryb, stream, aplikacje")
+                    help=_("state of the RUNNING instance (tray icon or --watch): mode, stream, apps"))
     ap.add_argument("--toggle", metavar="APP",
-                    help="w działającej instancji: dodaj/zabierz dźwięk aplikacji ze streamu "
-                         "(jak przycisk w OpenDeck)")
+                    help=_("in the running instance: add/remove an app's audio to/from the stream "
+                           "(like the OpenDeck key)"))
     ap.add_argument("--system", action="store_true",
-                    help="w działającej instancji: „Cały system” (przywróć zwykłe zachowanie Discorda)")
+                    help=_("in the running instance: “Whole system” (restore Discord's normal behaviour)"))
     ap.add_argument("--apply", nargs="+", metavar="APP",
-                    help="jednorazowo: do dźwięku streamu tylko te aplikacje (nazwy jak w --list)")
+                    help=_("one-shot: only these apps go to the stream audio (names as in --list)"))
     ap.add_argument("--capture", type=int, action="append", metavar="ID",
-                    help="id węzła przechwytującego Discorda (z --list), gdy wykrywanie jest niepewne; można podać kilka razy")
-    ap.add_argument("--restore", action="store_true", help="przywróć połączenia sprzed zmian (cały system)")
+                    help=_("id of Discord's capture node (from --list) when detection is ambiguous; "
+                           "may be given more than once"))
+    ap.add_argument("--restore", action="store_true",
+                    help=_("restore the links from before the changes (whole system)"))
     ap.add_argument("--watch", action="store_true",
-                    help="pilnuj bez ikony (aplikacje z --apply albo z konfiguracji); Ctrl+C przywraca")
-    ap.add_argument("--dry-run", action="store_true", help="tylko pokaż, co zostałoby zmienione")
-    ap.add_argument("--dump", metavar="PLIK", help="zapisz diagnostyczny pw-dump bez prywatnych danych ('-' = stdout)")
-    ap.add_argument("--tray", action="store_true", help="ikona w zasobniku (domyślnie, gdy brak argumentów)")
-    ap.add_argument("-v", "--verbose", action="store_true", help="więcej komunikatów")
+                    help=_("enforce without the tray icon (apps from --apply or from the config); "
+                           "Ctrl+C restores"))
+    ap.add_argument("--dry-run", action="store_true", help=_("only show what would change"))
+    ap.add_argument("--dump", metavar=_("FILE"),
+                    help=_("write a diagnostic pw-dump without private data ('-' = stdout)"))
+    ap.add_argument("--tray", action="store_true", help=_("tray icon (the default without arguments)"))
+    ap.add_argument("-v", "--verbose", action="store_true", help=_("more log messages"))
     ap.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     return ap
+
+
+def streams_count(n: int) -> str:
+    """"2 streams" / "2 strumienie" / "5 strumieni"."""
+    return ngettext("{n} stream", "{n} streams", n).format(n=n)
 
 
 # --------------------------------------------------------------------------
@@ -81,7 +93,7 @@ def _ids_to_serials(graph: Graph, ids: list[int] | None) -> tuple[list[int] | No
     for i in ids:
         n = graph.nodes.get(i)
         if n is None:
-            return None, f"Nie ma węzła o id {i} (sprawdź --list)."
+            return None, _("No node with id {id} (check --list).").format(id=i)
         out.append(n.serial)
     return out, None
 
@@ -146,7 +158,7 @@ def cmd_list(pw, config: Config, args) -> int:
     if args.json:
         out = {
             "status": det.status,
-            "status_text": STATUS_LABEL_PL.get(det.status, det.status),
+            "status_text": status_label(det.status),
             "message": det.message,
             "warnings": det.warnings,
             "group": [c.id for c in det.group],
@@ -163,53 +175,56 @@ def cmd_list(pw, config: Config, args) -> int:
         print(json.dumps(out, ensure_ascii=False, indent=2))
         return EXIT_OK
 
-    print(STATUS_LABEL_PL.get(det.status, det.status) + (f" ({det.message})" if det.message else ""))
+    print(status_label(det.status) + (f" ({det.message})" if det.message else ""))
     for w in det.warnings:
         print("  " + w)
     print()
-    print("Strumienie nagrywania Discorda:")
+    print(_("Discord capture streams:"))
     if not det.candidates:
-        print("  (brak)")
+        print("  " + _("(none)"))
     for c in det.candidates:
         mark = "*" if c.id in group_ids else " "
         print(f" {mark} {c.summary()}")
-        print(f"      serial {c.serial}; powody: {', '.join(c.reasons)}")
+        print("      " + _("serial {serial}; reasons: {reasons}").format(serial=c.serial, reasons=c.reasons_text()))
         if c.needs_confirm and not c.confirmed_by(cfg):
-            print(f"      tylko po monitorze wyjścia (może to być mikrofon) — potwierdź: --capture {c.id}")
+            print("      " + _("only via an output monitor (it could be a microphone) — confirm with: --capture {id}")
+                  .format(id=c.id))
         for l in graph.links_into(c.id):
             src = graph.nodes.get(l.out_node)
             sp = graph.ports.get(l.out_port)
             dp = graph.ports.get(l.in_port)
-            tag = " [nasze]" if l.managed else ""
+            tag = f" [{_('ours')}]" if l.managed else ""
             print(f"      <- {(src.name if src else '?')}#{l.out_node}:{sp.name if sp else '?'} -> {dp.name if dp else '?'}{tag}")
     print()
-    print("Aplikacje z dźwiękiem (nazwa do --apply):")
+    print(_("Apps playing audio (name for --apply):"))
     if not apps:
-        print("  (brak)")
+        print("  " + _("(none)"))
     sel = {k.casefold() for k in config.selected_apps}
     for a in apps:
         box = "[x]" if a.key.casefold() in sel else "[ ]"
         ids = ",".join(f"#{n.id}" for n in a.nodes)
         extra = []
         if not a.has_pid:
-            extra.append("bez PID — Discord sam tego nie łapie")
+            extra.append(_("no PID — Discord does not capture it by itself"))
         if any(n.id in feeding for n in a.nodes):
-            extra.append("idzie do Discorda")
+            extra.append(_("goes to Discord"))
         print(f"  {box} {a.display}  ({ids})" + (f"  — {'; '.join(extra)}" if extra else ""))
     print()
-    print(f"Konfiguracja: {config.path}")
-    print(f"  wybrane: {', '.join(config.selected_apps) or '(nic)'}; pilnowanie przy starcie: {'tak' if config.enforce else 'nie'}")
+    print(_("Config: {path}").format(path=config.path))
+    print("  " + _("selected: {apps}; enforce at start: {enforce}").format(
+        apps=", ".join(config.selected_apps) or _("(nothing)"),
+        enforce=_("yes") if config.enforce else _("no")))
     return EXIT_OK
 
 
 def _print_ops(plan) -> None:
     if not plan.ops:
-        print("Nic do zmiany.")
+        print(_("Nothing to change."))
     for op in plan.ops:
-        verb = "połącz  " if op.kind == "link" else "rozłącz "
-        print(f"  {verb} {op.desc}")
+        verb = _("link") if op.kind == "link" else _("unlink")
+        print(f"  {verb:<8} {op.desc}")
     for n in plan.notes:
-        print(f"  (uwaga: {n})")
+        print("  " + _("(note: {note})").format(note=n))
 
 
 def cmd_apply(pw, config: Config, args) -> int:
@@ -221,45 +236,46 @@ def cmd_apply(pw, config: Config, args) -> int:
         return EXIT_USAGE
     keys, missing = _resolve_app_names(graph, cfg, args.apply)
     if missing and len(missing) == len(args.apply):
-        # Literówka nie może wyciszyć całego streamu: bez żadnej znanej aplikacji nic nie zmieniamy.
-        names = ", ".join(f"„{m}”" for m in missing)
-        print(f"Nie widzę teraz żadnej z podanych aplikacji ({names}) — nic nie zmieniam.", file=sys.stderr)
+        # A typo must not mute the whole stream: without any known app nothing is changed.
+        names = ", ".join(_("“{name}”").format(name=m) for m in missing)
+        print(_("None of the given apps is playing right now ({names}) — not changing anything.")
+              .format(names=names), file=sys.stderr)
         apps = list_apps(graph, cfg)
         if apps:
-            print("Aplikacje, które teraz grają (nazwa do --apply): "
-                  + ", ".join(a.key for a in apps), file=sys.stderr)
+            print(_("Apps playing right now (name for --apply): {apps}")
+                  .format(apps=", ".join(a.key for a in apps)), file=sys.stderr)
         else:
-            print("Żadna aplikacja teraz nie gra.", file=sys.stderr)
+            print(_("No app is playing right now."), file=sys.stderr)
         return EXIT_USAGE
     for m in missing:
-        print(f"Uwaga: nie widzę teraz aplikacji „{m}” — ona NIE pójdzie do Discorda "
-              f"(sprawdź nazwę w --list).", file=sys.stderr)
+        print(_("Warning: app “{name}” is not playing right now — it will NOT go to Discord "
+                "(check the name with --list).").format(name=m), file=sys.stderr)
     store = SnapshotStore()
     enf = Enforcer(pw, config, store, enabled=True, selected=keys, persist=False, dcfg=cfg)
     det = detect(graph, cfg, override, enf._known(graph))
     if not det.found:
-        print(f"{STATUS_LABEL_PL.get(det.status, det.status)}: {det.message}", file=sys.stderr)
+        print(f"{status_label(det.status)}: {det.message}", file=sys.stderr)
         _print_candidates_hint(det)
         return EXIT_NO_CAPTURE
     plan = plan_apply(graph, det.group_nodes, keys, cfg, snapshot_originals(graph, store.data))
-    print(f"Strumień Discorda: {', '.join(c.summary() for c in det.group)}")
+    print(_("Discord stream: {streams}").format(streams=", ".join(c.summary() for c in det.group)))
     _print_ops(plan)
     if args.dry_run:
         return EXIT_OK
-    # --capture = wybór użytkownika; potwierdzenie strumienia „z monitora” zostaje zapamiętane
+    # --capture = the user's choice; confirming a "monitor-only" stream is remembered
     st = enf.set_capture_override(override) if override else enf.refresh("--apply")
     if st.error:
-        print(f"Błąd: {st.error}", file=sys.stderr)
+        print(_("Error: {error}").format(error=st.error), file=sys.stderr)
         return EXIT_ERROR
-    print(f"Gotowe: {st.last_action or 'bez zmian'}. Cofnięcie: warpipe --restore")
+    print(_("Done: {action}. To undo: warpipe --restore").format(action=st.last_action or _("no changes")))
     return EXIT_OK
 
 
 def _print_candidates_hint(det: Detection) -> None:
     if det.candidates:
-        print("Kandydaci (podaj --capture ID):", file=sys.stderr)
+        print(_("Candidates (pass --capture ID):"), file=sys.stderr)
         for c in det.candidates:
-            print(f"  {c.summary()} — {', '.join(c.reasons)}", file=sys.stderr)
+            print(f"  {c.summary()} — {c.reasons_text()}", file=sys.stderr)
 
 
 def cmd_restore(pw, config: Config, args) -> int:
@@ -271,23 +287,23 @@ def cmd_restore(pw, config: Config, args) -> int:
     enf = Enforcer(pw, config, store, enabled=False, persist=False)
     ok, msg = enf.restore("--restore")
     if not ok:
-        print(f"Błąd przywracania: {msg}", file=sys.stderr)
+        print(_("Restore error: {error}").format(error=msg), file=sys.stderr)
         return EXIT_ERROR
-    print(f"Przywrócono ({msg}).")
+    print(_("Restored ({details}).").format(details=msg))
     return EXIT_OK
 
 
 def cmd_watch(pw, config: Config, args) -> int:
     cfg = config.detect_config()
     if args.apply:
-        # --watch --apply: na sztywno te aplikacje; zmiany przez kanał sterowania nie są zapisywane
+        # --watch --apply: exactly these apps; changes via the control channel are not saved
         keys, enabled, persist = list(args.apply), True, False
     else:
-        # --watch bez --apply: dokładnie jak ikona — wybór i tryb z konfiguracji, zmiany
-        # (np. z wtyczki OpenDeck) są zapisywane
+        # --watch without --apply: exactly like the tray icon — selection and mode from
+        # the config, changes (e.g. from the OpenDeck plugin) are saved
         keys, enabled, persist = config.selected_apps, config.enforce, True
     if enabled and not keys:
-        print("Uwaga: nie wybrano żadnej aplikacji — do Discorda nie pójdzie nic.", file=sys.stderr)
+        print(_("Warning: no app selected — nothing will go to Discord."), file=sys.stderr)
     enf = Enforcer(pw, config, SnapshotStore(), enabled=enabled, selected=keys, persist=persist, dcfg=cfg)
     if args.capture:
         graph = Graph.from_dump(pw.dump())
@@ -295,23 +311,23 @@ def cmd_watch(pw, config: Config, args) -> int:
         if err:
             print(err, file=sys.stderr)
             return EXIT_USAGE
-        # tylko ustawienie + zapamiętanie potwierdzenia; pierwsze odświeżenie zrobi Watcher
-        # (już z obsługą SIGTERM/SIGINT, która przywraca stan)
+        # only set it + remember the confirmation; the Watcher does the first refresh
+        # (already with the SIGTERM/SIGINT handling that restores the state)
         enf.override = override
         enf._remember_confirmation(override)
     watcher = Watcher(enf, pw)
 
     def on_signal(signum, frame):
-        log.info("sygnał %s — kończę i przywracam", signum)
+        log.info("signal %s — stopping and restoring", signum)
         watcher.stop()
 
     signal.signal(signal.SIGTERM, on_signal)
     signal.signal(signal.SIGINT, on_signal)
     signal.signal(signal.SIGHUP, on_signal)
     if enabled:
-        log.info("pilnuję: %s", ", ".join(keys) or "(nic)")
+        log.info("enforcing: %s", ", ".join(keys) or "(nothing)")
     else:
-        log.info("tryb „Cały system” (pilnowanie wyłączone w konfiguracji); czekam na polecenia")
+        log.info("\"Whole system\" mode (enforcement disabled in the config); waiting for commands")
     server = start_control_server(enf)
     try:
         watcher.run()
@@ -320,38 +336,35 @@ def cmd_watch(pw, config: Config, args) -> int:
             server.stop()
         ok, msg = enf.shutdown()
         if not ok:
-            print(f"Błąd przywracania przy wyjściu: {msg}", file=sys.stderr)
+            print(_("Restore error on exit: {error}").format(error=msg), file=sys.stderr)
     return EXIT_OK
 
 
 # --------------------------------------------------------------------------
-# Polecenia do działającej instancji (kanał sterowania)
+# Commands for the running instance (control channel)
 # --------------------------------------------------------------------------
 
 def _print_status(status: dict) -> None:
     cap = status.get("capture") or {}
-    label = CAPTURE_LABEL_PL.get(cap.get("status"), "Stream z dźwiękiem: ?")
+    label = _(CAPTURE_LABEL.get(cap.get("status"), STATUS_UNKNOWN_LABEL))
     n = cap.get("count") or 0
-    print(label + (f" ({n} strumienie)" if n > 1 else ""))
+    print(label + (f" ({streams_count(n)})" if n > 1 else ""))
     apps = status.get("apps") or []
-    if status.get("enforce"):
-        chosen = [a["key"] for a in apps if a.get("selected")]
-        print("Do Discorda tylko: " + (", ".join(chosen) if chosen else "nic (nic nie zaznaczono)"))
-    else:
-        print("Do Discorda: cały dźwięk systemu")
+    chosen = [a["key"] for a in apps if a.get("selected")]
+    print(routing_text(bool(status.get("enforce")), chosen))
     if status.get("error"):
-        print("Błąd: " + str(status["error"]))
+        print(_("Error: {error}").format(error=status["error"]))
     print()
-    print("Aplikacje:")
+    print(_("Apps:"))
     if not apps:
-        print("  (żadna aplikacja teraz nie gra)")
+        print("  " + _("(no app is playing right now)"))
     for a in apps:
         box = "[x]" if a.get("selected") and status.get("enforce") else "[ ]"
         extra = []
         if not a.get("present"):
-            extra.append("teraz nie gra")
+            extra.append(_("not playing now"))
         if a.get("in_stream"):
-            extra.append("na streamie")
+            extra.append(_("on stream"))
         print(f"  {box} {a.get('display') or a.get('key')}" + (f"  — {', '.join(extra)}" if extra else ""))
 
 
@@ -365,13 +378,13 @@ def cmd_remote(args) -> int:
     try:
         reply = control_request(req)
     except NotRunning as e:
-        print(f"{e} Uruchom go: warpipe (ikona) albo warpipe --watch.", file=sys.stderr)
+        print(_("{error} Start it with: warpipe (tray icon) or warpipe --watch.").format(error=e), file=sys.stderr)
         return EXIT_NOT_RUNNING
     except ControlError as e:
-        print(f"Błąd: {e}", file=sys.stderr)
+        print(_("Error: {error}").format(error=e), file=sys.stderr)
         return EXIT_ERROR
     if not reply.get("ok"):
-        print(f"Błąd: {reply.get('error') or 'nieznany'}", file=sys.stderr)
+        print(_("Error: {error}").format(error=reply.get("error") or _("unknown error")), file=sys.stderr)
         if args.json and isinstance(reply.get("status"), dict):
             print(json.dumps(reply["status"], ensure_ascii=False, indent=2))
         return EXIT_USAGE if "status" not in reply else EXIT_ERROR
@@ -394,7 +407,7 @@ def cmd_dump(pw, args) -> int:
     else:
         with open(args.dump, "w", encoding="utf-8") as f:
             f.write(text)
-        print(f"Zapisano {args.dump} (bez tytułów strumieni i danych osobistych).")
+        print(_("Saved {path} (without stream titles or personal data).").format(path=args.dump))
     return EXIT_OK
 
 
@@ -407,16 +420,16 @@ def main(argv: list[str] | None = None) -> int:
     if args.apply and not args.watch:
         modes.append("apply")
     if len(modes) > 1:
-        ap.error("wybierz jedno: --list, --apply, --restore, --watch, --dump, --tray, --status, "
-                 "--toggle, --system (wyjątek: --watch --apply)")
+        ap.error(_("choose one of: --list, --apply, --restore, --watch, --dump, --tray, --status, "
+                   "--toggle, --system (exception: --watch --apply)"))
     if args.json and not (args.list or args.status):
-        ap.error("--json działa tylko z --list albo --status")
+        ap.error(_("--json only works with --list or --status"))
     if args.dry_run and not (args.apply or args.restore) or (args.dry_run and args.watch):
-        ap.error("--dry-run działa z --apply albo --restore")
+        ap.error(_("--dry-run works with --apply or --restore"))
     if modes and modes[0] in ("status", "toggle", "system"):
         if args.toggle is not None and not args.toggle.strip():
-            ap.error("--toggle wymaga nazwy aplikacji (jak w --list)")
-        # Tylko rozmowa z działającą instancją — bez blokady, bez PipeWire, bez konfiguracji.
+            ap.error(_("--toggle needs an app name (as shown by --list)"))
+        # Only talks to the running instance — no lock, no PipeWire, no config.
         return cmd_remote(args)
     if not modes:
         if os.environ.get("WAYLAND_DISPLAY") or os.environ.get("DISPLAY"):
@@ -429,11 +442,11 @@ def main(argv: list[str] | None = None) -> int:
     setup_logging(args.verbose, quiet=mode in ("list", "dump") or args.dry_run)
     config = Config()
     if config.load_error:
-        print(f"Uwaga: {config.load_error} — używam ustawień domyślnych.", file=sys.stderr)
+        print(_("Warning: {error} — using default settings.").format(error=config.load_error), file=sys.stderr)
     pw = PwCli()
 
     if mode == "tray":
-        from .tray import run_tray  # PySide6 tylko gdy potrzebne
+        from .tray import run_tray  # PySide6 only when needed
         return run_tray(args, config, pw)
 
     try:
@@ -445,8 +458,9 @@ def main(argv: list[str] | None = None) -> int:
         lock = InstanceLock()
         if needs_lock and not lock.acquire():
             pid = lock.holder_pid()
-            print(f"Działa już inna instancja ({'PID ' + str(pid) if pid else 'ikona albo --watch'}). "
-                  "Zamknij ją albo użyj jej menu.", file=sys.stderr)
+            who = f"PID {pid}" if pid else _("tray icon or --watch")
+            print(_("Another instance is already running ({who}). Quit it or use its menu.").format(who=who),
+                  file=sys.stderr)
             return EXIT_LOCKED
         try:
             if mode == "apply":
@@ -458,6 +472,6 @@ def main(argv: list[str] | None = None) -> int:
         finally:
             lock.release()
     except PwError as e:
-        print(f"Błąd: {e}", file=sys.stderr)
+        print(_("Error: {error}").format(error=e), file=sys.stderr)
         return EXIT_ERROR
     return EXIT_USAGE

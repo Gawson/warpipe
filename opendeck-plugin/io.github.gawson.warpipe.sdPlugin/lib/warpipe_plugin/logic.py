@@ -1,17 +1,22 @@
-"""Czysta logika wtyczki (bez Qt, bez sieci): łatwa do testowania.
+"""Pure plugin logic (no Qt, no network): easy to test.
 
-Słowniczek:
-  status — stan z narzędzia (gniazdo sterowania), np.
+Glossary:
+  status — state reported by the tool (control socket), e.g.
            {"enforce": false, "capture": {"status": "active", "count": 1},
             "apps": [{"key": "Firefox", "display": "Firefox", "present": true,
                       "selected": false, "in_stream": true}]}
-           None = narzędzie nie działa (brak połączenia).
-  settings — ustawienia jednego przycisku w OpenDeck: {"app": klucz, "label": podpis}
-  global settings — ustawienia całej wtyczki: {"toolPath": ścieżka do warpipe}
+           None = the tool is not running (no connection).
+  settings — settings of one OpenDeck key: {"app": key, "label": caption}
+  global settings — plugin-wide settings: {"toolPath": path to warpipe}
+
+Language: English by default, Polish as an optional translation (tr(), PL).
+The choice mirrors the tool (warpipe/i18n.py): WARPIPE_LANG, then the tool's
+config key "language" ("auto" | "en" | "pl"), then LC_ALL / LC_MESSAGES / LANG.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import stat
@@ -23,48 +28,156 @@ ACTION_SYSTEM = "io.github.gawson.warpipe.system"
 TOOL_NAME = "warpipe"
 MAX_SETTING_LEN = 200
 
-# Stany przycisku
-S_UNSET = "unset"          # przycisk bez wybranej aplikacji
-S_DOWN = "down"            # narzędzie nie działa (naciśnięcie je uruchamia)
-S_STARTING = "starting"    # właśnie uruchamiamy narzędzie
-S_ERROR = "error"          # narzędzie działa, ale zgłasza błąd (np. PipeWire)
-S_ABSENT = "absent"        # aplikacja teraz nie gra
-S_NOSTREAM = "nostream"    # aplikacja gra, ale nie ma streamu z dźwiękiem
-S_UNSURE = "unsure"        # stream jest, ale narzędzie nie wie, który strumień Discorda
-S_OFF = "off"              # aplikacja gra, nie idzie do streamu
-S_ON = "on"                # aplikacja gra i JEST w streamie
-S_SYS_ON = "sys_on"        # „Cały system” włączony (pilnowanie wyłączone)
-S_SYS_OFF = "sys_off"      # tylko wybrane aplikacje
+# Key states
+S_UNSET = "unset"          # key without a chosen app
+S_DOWN = "down"            # the tool is not running (pressing starts it)
+S_STARTING = "starting"    # the tool is being started
+S_ERROR = "error"          # the tool runs but reports an error (e.g. PipeWire)
+S_ABSENT = "absent"        # the app is not playing right now
+S_NOSTREAM = "nostream"    # the app plays, but there is no Go Live stream with sound
+S_UNSURE = "unsure"        # there is a stream, but the tool can't tell which Discord stream
+S_OFF = "off"              # the app plays, not going to the stream
+S_ON = "on"                # the app plays and IS on stream
+S_SYS_ON = "sys_on"        # "Whole system" active (enforcement off)
+S_SYS_OFF = "sys_off"      # only selected apps
 
+# Badge texts are English msgids, translated by tr() when a Visual is built.
 BADGE = {
     S_UNSET: "",
-    S_DOWN: "uruchom",
-    S_STARTING: "uruchamiam…",
-    S_ERROR: "błąd",
-    S_ABSENT: "brak",
-    S_NOSTREAM: "brak streamu",
-    S_UNSURE: "niepewny",
+    S_DOWN: "start",
+    S_STARTING: "starting…",
+    S_ERROR: "error",
+    S_ABSENT: "not playing",
+    S_NOSTREAM: "no stream",
+    S_UNSURE: "unsure",
     S_OFF: "",
-    S_ON: "na streamie",
-    S_SYS_ON: "włączony",
-    S_SYS_OFF: "tylko wybrane",
+    S_ON: "on stream",
+    S_SYS_ON: "on",
+    S_SYS_OFF: "only selected",
 }
 
-SYSTEM_LABEL = "Cały system"
-UNSET_LABEL = "wybierz aplikację"
+SYSTEM_LABEL = "Whole system"
+UNSET_LABEL = "pick an app"
 
-# Zmienne środowiska, których NIE przekazujemy uruchamianemu narzędziu (mogłyby
-# podmienić Pythona albo biblioteki, np. gdy OpenDeck działa z AppImage).
+# Environment variables NOT passed to the launched tool (they could swap the
+# Python interpreter or libraries, e.g. when OpenDeck runs from an AppImage).
 CHILD_ENV_DROP = ("PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "PYTHONSAFEPATH",
                   "PYTHONUSERBASE", "LD_LIBRARY_PATH", "LD_PRELOAD")
 
 
 # --------------------------------------------------------------------------
-# Ścieżki
+# Language (mirrors warpipe/i18n.py; the plugin is installed separately)
+# --------------------------------------------------------------------------
+
+LANGUAGES = ("en", "pl")
+DEFAULT_LANGUAGE = "en"
+LANG_ENV_VAR = "WARPIPE_LANG"
+LOCALE_VARS = ("LC_ALL", "LC_MESSAGES", "LANG")
+
+PL = {
+    # key badges and labels
+    "start": "uruchom",
+    "starting…": "uruchamiam…",
+    "error": "błąd",
+    "not playing": "brak",
+    "no stream": "brak streamu",
+    "unsure": "niepewny",
+    "on stream": "na streamie",
+    "on": "włączony",
+    "only selected": "tylko wybrane",
+    "Whole system": "Cały system",
+    "pick an app": "wybierz aplikację",
+    # key presses
+    "This key has no app selected — pick one in the key settings.":
+        "Przycisk nie ma wybranej aplikacji — wybierz ją w ustawieniach przycisku.",
+    "App {app} is not playing right now — nothing to toggle.":
+        "Aplikacja {app} teraz nie gra — nie ma czego przełączać.",
+    # finding the tool
+    "The program path must be absolute (start with / or ~/): {path}":
+        "Ścieżka do programu musi być pełna (zaczynać się od / albo ~/): {path}",
+    "Program not found (or not executable): {path}":
+        "Nie ma programu (albo nie da się go uruchomić): {path}",
+    "Can't find the warpipe program (not in PATH or ~/.local/bin). "
+    "Install it or set its path in the key settings (Advanced).":
+        "Nie znalazłem programu warpipe (ani w PATH, ani w ~/.local/bin). "
+        "Zainstaluj go albo podaj ścieżkę w ustawieniach przycisku (Zaawansowane).",
+    # plugin process (OpenDeck log)
+    "unknown error": "nieznany błąd",
+    "Warpipe reported an error: {error}": "Warpipe zgłosił błąd: {error}",
+    "not connected to Warpipe": "brak połączenia z programem Warpipe",
+    "failed to start {program}: {error}": "nie udało się uruchomić {program}: {error}",
+    "starting Warpipe: {program} --tray": "uruchamiam Warpipe: {program} --tray",
+}
+
+_language = DEFAULT_LANGUAGE
+
+
+def normalize_language(value) -> str | None:
+    """"en" / "pl", or None for "auto" (and missing/empty). Other languages → "en"."""
+    if not isinstance(value, str):
+        return None
+    v = value.strip().lower()
+    if not v or v == "auto":
+        return None
+    return "pl" if v.startswith("pl") else "en"
+
+
+def config_path(env=None) -> str:
+    """The tool's config file (same as warpipe.state.config_dir() / "config.json")."""
+    env = os.environ if env is None else env
+    d = env.get("DISCORD_DZWIEK_CONFIG_DIR")
+    if not d:
+        base = env.get("XDG_CONFIG_HOME") or os.path.join(
+            env.get("HOME") or os.path.expanduser("~"), ".config")
+        d = os.path.join(base, "warpipe")
+    return os.path.join(d, "config.json")
+
+
+def _config_language(env) -> str | None:
+    try:
+        with open(config_path(env), encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return data.get("language") if isinstance(data, dict) else None
+
+
+def resolve_language(env=None) -> str:
+    """WARPIPE_LANG, then the tool's config key "language", then the locale."""
+    env = os.environ if env is None else env
+    lang = normalize_language(env.get(LANG_ENV_VAR)) or normalize_language(_config_language(env))
+    if lang:
+        return lang
+    for var in LOCALE_VARS:
+        v = env.get(var)
+        if v:
+            return "pl" if v.strip().lower().startswith("pl") else "en"
+    return DEFAULT_LANGUAGE
+
+
+def set_language(lang) -> str:
+    """Set "en" or "pl" (anything else / "auto" → English). Returns the language set."""
+    global _language
+    _language = normalize_language(lang) or DEFAULT_LANGUAGE
+    return _language
+
+
+def language() -> str:
+    return _language
+
+
+def tr(msgid: str) -> str:
+    if _language == "pl" and msgid:
+        return PL.get(msgid, msgid)
+    return msgid
+
+
+# --------------------------------------------------------------------------
+# Paths
 # --------------------------------------------------------------------------
 
 def runtime_dir(env=None) -> str:
-    """To samo co warpipe.state.runtime_dir()."""
+    """Same as warpipe.state.runtime_dir()."""
     env = os.environ if env is None else env
     d = env.get("DISCORD_DZWIEK_RUNTIME_DIR")
     if d:
@@ -80,11 +193,11 @@ def control_socket_path(env=None) -> str:
 
 
 # --------------------------------------------------------------------------
-# Ustawienia
+# Settings
 # --------------------------------------------------------------------------
 
 def clean_text(value, limit: int = MAX_SETTING_LEN) -> str:
-    """Tekst z ustawień: tylko str, bez znaków sterujących, przycięty."""
+    """Text from settings: str only, no control characters, trimmed."""
     if not isinstance(value, str):
         return ""
     v = "".join(ch for ch in value if ord(ch) >= 32 and ord(ch) != 127).strip()
@@ -102,7 +215,7 @@ def sanitize_global_settings(raw) -> dict:
 
 
 def short_label(key: str) -> str:
-    """Krótszy podpis: „Warframe.x64.exe” → „Warframe”."""
+    """Shorter caption: "Warframe.x64.exe" -> "Warframe"."""
     s = (key or "").strip()
     low = s.lower()
     if low.endswith(".exe") and len(s) > 4:
@@ -119,11 +232,11 @@ def label_for(settings: dict) -> str:
 
 
 # --------------------------------------------------------------------------
-# Stan narzędzia
+# Tool state
 # --------------------------------------------------------------------------
 
 def normalize_status(raw) -> dict | None:
-    """Sprawdza kształt stanu z gniazda; zły kształt → None (traktujemy jak „brak stanu”)."""
+    """Validate the shape of a status from the socket; bad shape -> None ("no status")."""
     if not isinstance(raw, dict):
         return None
     cap = raw.get("capture") if isinstance(raw.get("capture"), dict) else {}
@@ -157,22 +270,22 @@ def find_app(status: dict | None, key: str) -> dict | None:
 
 
 def is_effective(status: dict | None, key: str) -> bool:
-    """Aplikacja jest wybrana „na wyłączność” (pilnowanie włączone i zaznaczona)."""
+    """The app is selected "exclusively" (enforcement on and the app selected)."""
     a = find_app(status, key)
     return bool(status and status.get("enforce") and a and a.get("selected"))
 
 
 # --------------------------------------------------------------------------
-# Wygląd przycisku
+# Key appearance
 # --------------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class Visual:
     kind: str           # "app" | "system"
     state: str          # S_*
-    label: str          # podpis (nazwa aplikacji)
-    badge: str          # mały napis u góry
-    ring: bool = False  # zielona ramka: zaznaczona, ale teraz nie w streamie
+    label: str          # caption (app name)
+    badge: str          # small text at the top (already translated)
+    ring: bool = False  # green ring: selected, but not on stream right now
 
     @property
     def tag(self) -> str:
@@ -180,13 +293,13 @@ class Visual:
 
 
 def _v(kind: str, state: str, label: str, ring: bool = False) -> Visual:
-    return Visual(kind, state, label, BADGE[state], ring)
+    return Visual(kind, state, label, tr(BADGE[state]), ring)
 
 
 def app_visual(settings: dict, status: dict | None, tool_running: bool, starting: bool = False) -> Visual:
     key = settings.get("app", "")
     if not key:
-        return _v("app", S_UNSET, UNSET_LABEL)
+        return _v("app", S_UNSET, tr(UNSET_LABEL))
     label = label_for(settings)
     if not tool_running or status is None:
         return _v("app", S_STARTING if starting else S_DOWN, label)
@@ -208,10 +321,10 @@ def app_visual(settings: dict, status: dict | None, tool_running: bool, starting
 
 def system_visual(status: dict | None, tool_running: bool, starting: bool = False) -> Visual:
     if not tool_running or status is None:
-        return _v("system", S_STARTING if starting else S_DOWN, SYSTEM_LABEL)
+        return _v("system", S_STARTING if starting else S_DOWN, tr(SYSTEM_LABEL))
     if status.get("enforce"):
-        return _v("system", S_SYS_OFF, SYSTEM_LABEL)
-    return _v("system", S_SYS_ON, SYSTEM_LABEL)
+        return _v("system", S_SYS_OFF, tr(SYSTEM_LABEL))
+    return _v("system", S_SYS_ON, tr(SYSTEM_LABEL))
 
 
 def visual_for(action: str, settings: dict, status: dict | None, tool_running: bool,
@@ -222,7 +335,7 @@ def visual_for(action: str, settings: dict, status: dict | None, tool_running: b
 
 
 # --------------------------------------------------------------------------
-# Naciśnięcie
+# Key press
 # --------------------------------------------------------------------------
 
 @dataclass(frozen=True)
@@ -240,17 +353,17 @@ def press_for(action: str, settings: dict, status: dict | None, tool_running: bo
         return Press("system")
     key = settings.get("app", "")
     if not key:
-        return Press("alert", reason="Przycisk nie ma wybranej aplikacji — wybierz ją w ustawieniach przycisku.")
+        return Press("alert", reason=tr("This key has no app selected — pick one in the key settings."))
     if not tool_running or status is None:
         return Press("none") if starting else Press("launch")
     a = find_app(status, key)
     if (a is None or not a.get("present")) and not is_effective(status, key):
-        return Press("alert", reason=f"Aplikacja {key} teraz nie gra — nie ma czego przełączać.")
+        return Press("alert", reason=tr("App {app} is not playing right now — nothing to toggle.").format(app=key))
     return Press("toggle", app=key)
 
 
 # --------------------------------------------------------------------------
-# Inspektor właściwości (lista aplikacji)
+# Property inspector (app list)
 # --------------------------------------------------------------------------
 
 def apps_for_pi(status: dict | None, tool_running: bool, settings: dict) -> dict:
@@ -266,11 +379,12 @@ def apps_for_pi(status: dict | None, tool_running: bool, settings: dict) -> dict
         "enforce": bool(status and status.get("enforce")),
         "apps": apps,
         "current": dict(settings),
+        "lang": _language,
     }
 
 
 # --------------------------------------------------------------------------
-# Uruchamianie narzędzia
+# Starting the tool
 # --------------------------------------------------------------------------
 
 def _is_exec_file(path: str) -> bool:
@@ -282,10 +396,10 @@ def _is_exec_file(path: str) -> bool:
 
 
 def resolve_tool(global_settings: dict, env=None, which=shutil.which) -> tuple[list[str] | None, str]:
-    """Polecenie uruchamiające ikonę narzędzia: (argv, opis problemu).
+    """Command that starts the tool's tray icon: (argv, problem description).
 
-    Zawsze lista argumentów (bez powłoki). Kolejność: ścieżka z ustawień wtyczki,
-    warpipe z PATH, ~/.local/bin, ~/.local/share/warpipe."""
+    Always an argument list (no shell). Order: path from the plugin settings,
+    warpipe from PATH, ~/.local/bin, ~/.local/share/warpipe."""
     env = os.environ if env is None else env
     configured = (global_settings or {}).get("toolPath", "")
     home = env.get("HOME") or os.path.expanduser("~")
@@ -294,12 +408,12 @@ def resolve_tool(global_settings: dict, env=None, which=shutil.which) -> tuple[l
         if p.startswith("~/"):
             p = os.path.join(home, p[2:])
         if not os.path.isabs(p):
-            return None, f"Ścieżka do programu musi być pełna (zaczynać się od / albo ~/): {configured}"
+            return None, tr("The program path must be absolute (start with / or ~/): {path}").format(path=configured)
         if not _is_exec_file(p):
-            return None, f"Nie ma programu (albo nie da się go uruchomić): {p}"
+            return None, tr("Program not found (or not executable): {path}").format(path=p)
         return [p, "--tray"], ""
-    # Tylko bezwzględne wpisy PATH: „.” albo puste wpisy znaczyłyby katalog bieżący
-    # (a OpenDeck uruchamia wtyczkę w jej własnym katalogu).
+    # Absolute PATH entries only: "." or empty entries would mean the current
+    # directory (and OpenDeck starts the plugin in its own directory).
     path = os.pathsep.join(p for p in (env.get("PATH") or "").split(os.pathsep) if os.path.isabs(p))
     found = which(TOOL_NAME, path=path) if path else None
     if found and os.path.isabs(found) and _is_exec_file(found):
@@ -308,8 +422,8 @@ def resolve_tool(global_settings: dict, env=None, which=shutil.which) -> tuple[l
               os.path.join(home, ".local", "share", "warpipe", TOOL_NAME)):
         if _is_exec_file(p):
             return [p, "--tray"], ""
-    return None, ("Nie znalazłem programu warpipe (ani w PATH, ani w ~/.local/bin). "
-                  "Zainstaluj go albo podaj ścieżkę w ustawieniach przycisku (Zaawansowane).")
+    return None, tr("Can't find the warpipe program (not in PATH or ~/.local/bin). "
+                    "Install it or set its path in the key settings (Advanced).")
 
 
 def child_env(env=None) -> dict:
