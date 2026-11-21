@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Dźwięk do Discorda
+Name[en]=Discord Audio Picker
+GenericName=Wybór dźwięku do streamu Discorda
+Comment=Do streamu w Discordzie trafia tylko dźwięk wybranych aplikacji
+Comment[en]=Send only selected applications' audio to Discord screen share
+Exec=discord-dzwiek
+Icon=audio-volume-high
+Terminal=false
+Categories=AudioVideo;Audio;Mixer;
+Keywords=discord;audio;dźwięk;stream;go live;pipewire;
+StartupNotify=false
