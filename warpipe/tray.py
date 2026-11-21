@@ -19,6 +19,10 @@ Right click: the menu (exported over DBusMenu, shown by the panel):
 The window's menu button: Which Discord stream? (when needed), Language, Start at
 login, Quit.
 
+Notifications: only while the window is closed, only for what needs attention and
+was not just caused by the user (errors, the loop protection, an ambiguous stream,
+Go Live with nothing selected — once per Go Live session); see should_notify().
+
 Graph watching runs in a separate thread (Watcher); the state reaches the GUI
 through a Qt signal (queued connection between threads) and updates the menu and
 the open window there.
@@ -52,6 +56,28 @@ from .state import (Config, InstanceLock, SnapshotStore, autostart_available,
                     autostart_enabled, set_autostart)
 
 log = logging.getLogger("warpipe")
+
+# ------------------------------------------------------------ notifications
+# A tray notification only when the window is NOT open (it shows the state itself)
+# and something happened that needs the user's attention and that they did not
+# just cause themselves. Expected results of their own actions (ticking an app,
+# "Only selected apps", "Whole system", the saved selection applied when Go Live
+# starts) are silent — the log keeps them.
+NOTIFY_ERROR = "error"                 # restore failed, PipeWire tools failing, can't save …
+NOTIFY_LOOP = "loop"                   # something keeps relinking — enforcement paused
+NOTIFY_AMBIGUOUS = "ambiguous"         # can't tell which Discord stream is Go Live: pick one
+NOTIFY_SILENT_STREAM = "silent_stream"  # Go Live audio, "Only selected apps", nothing selected
+ATTENTION = frozenset({NOTIFY_ERROR, NOTIFY_LOOP, NOTIFY_AMBIGUOUS, NOTIFY_SILENT_STREAM})
+NOTIFY_INTERVAL = 60.0                 # the same text at most once a minute
+
+
+def should_notify(kind: str, window_visible: bool, last_sent: float | None, now: float,
+                  interval: float = NOTIFY_INTERVAL) -> bool:
+    """Show a tray notification? kind: an Enforcer event kind or NOTIFY_*; last_sent:
+    when the same text was shown last (None = never)."""
+    if window_visible or kind not in ATTENTION:
+        return False
+    return last_sent is None or now - last_sent >= interval
 
 LANGUAGE_CHOICES = (("auto", None), ("en", "English"), ("pl", "Polski"))   # names never translated
 
@@ -98,7 +124,9 @@ class TrayController(QObject):
         self._signature = None
         self._pending_status: Status | None = None
         self._rebuild_scheduled = False
-        self._last_msg: tuple[str, float] = ("", 0.0)
+        self._sent: dict[str, float] = {}        # notification text -> when shown
+        self._was_ambiguous = False
+        self._silent_noticed = False              # this Go Live session (see _status_alerts)
         self.app_actions: dict[str, QAction] = {}
         self.act_enforce: QAction | None = None
         self.act_restore: QAction | None = None
@@ -270,18 +298,42 @@ class TrayController(QObject):
         if st is not None:
             self.build_menu(st)
             self._update_popup(st)
+            self._status_alerts(st)
 
     def _on_event(self, kind: str, msg: str) -> None:
-        if kind not in ("applied", "restored", "capture_found", "error", "loop", "warning"):
-            return
+        # Enforcer events: only errors and the loop protection can notify; "applied",
+        # "restored", "capture_found" and the empty-selection "warning" (a result of
+        # the user's own click) are silent — see _status_alerts for a silent stream.
+        self.notify(kind, msg)
+
+    def notify(self, kind: str, msg: str) -> bool:
         now = time.monotonic()
-        if msg == self._last_msg[0] and now - self._last_msg[1] < 5.0:
-            return
-        self._last_msg = (msg, now)
-        icon = (QSystemTrayIcon.MessageIcon.Warning if kind in ("error", "loop", "warning")
-                else QSystemTrayIcon.MessageIcon.Information)
-        if self.tray.isVisible():
-            self.tray.showMessage(APP_NAME, msg, icon, 4000)
+        if not should_notify(kind, self.popup.isVisible(), self._sent.get(msg), now):
+            return False
+        if not self.tray.isVisible():
+            return False
+        self._sent[msg] = now
+        icon = (QSystemTrayIcon.MessageIcon.Critical if kind == NOTIFY_ERROR
+                else QSystemTrayIcon.MessageIcon.Warning)
+        self.tray.showMessage(APP_NAME, msg, icon, 6000)
+        return True
+
+    def _status_alerts(self, st: Status) -> None:
+        """Attention-worthy states seen in a status (not on every refresh):
+        - detection became ambiguous (the user has to pick a stream);
+        - Go Live audio while "Only selected apps" has nothing selected (the stream
+          is silent) — at most once per Go Live session; while the window is open
+          the window's notice counts as telling the user."""
+        ambiguous = st.capture_status == STATUS_AMBIGUOUS
+        if ambiguous and not self._was_ambiguous:
+            self.notify(NOTIFY_AMBIGUOUS, st.headline())
+        self._was_ambiguous = ambiguous
+        found = st.detection is not None and st.detection.found
+        if not found:
+            self._silent_noticed = False          # Go Live ended: a new session may warn again
+        elif st.enabled and not st.selected and not self._silent_noticed:
+            self._silent_noticed = True
+            self.notify(NOTIFY_SILENT_STREAM, _("No app selected — the stream has no audio until you tick one"))
 
     def _on_about_to_show(self) -> None:
         # The app list is rebuilt whenever the menu opens.
@@ -358,7 +410,7 @@ class TrayController(QObject):
         try:
             set_autostart(bool(checked))
         except OSError as e:
-            self._on_event("error", _("Can't change start at login: {error}").format(error=e))
+            self.notify(NOTIFY_ERROR, _("Can't change start at login: {error}").format(error=e))
         if self.act_autostart is not None:
             self.act_autostart.setChecked(autostart_enabled())
 
@@ -372,7 +424,7 @@ class TrayController(QObject):
         try:
             self.enforcer.set_app_selected(key, bool(checked))
         except InvalidAppName as e:   # a name from the graph that can't be saved
-            self._on_event("error", str(e))
+            self.notify(NOTIFY_ERROR, str(e))
 
     def _on_pick_capture(self, serials) -> None:
         self.enforcer.set_capture_override(serials)

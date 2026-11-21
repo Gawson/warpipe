@@ -88,6 +88,20 @@ class TestTrayIcons(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_QT, "PySide6 missing")
+class TestShouldNotify(unittest.TestCase):
+    def test_policy(self):
+        from warpipe.tray import should_notify
+        for kind in ("error", "loop", "ambiguous", "silent_stream"):
+            self.assertTrue(should_notify(kind, False, None, 100.0), kind)
+            self.assertFalse(should_notify(kind, True, None, 100.0), kind)        # window open
+        for kind in ("applied", "restored", "capture_found", "warning", "", "whatever"):
+            self.assertFalse(should_notify(kind, False, None, 100.0), kind)      # expected results
+        self.assertFalse(should_notify("error", False, 50.0, 109.9))              # same text < 60 s
+        self.assertTrue(should_notify("error", False, 50.0, 110.0))
+        self.assertTrue(should_notify("error", False, 50.0, 60.0, interval=10.0))
+
+
+@unittest.skipUnless(HAVE_QT, "PySide6 missing")
 class TestTrayMenu(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -165,11 +179,16 @@ class TestTrayMenu(unittest.TestCase):
         self.assertEqual(st.routing_text(), "To Discord: nothing (stream audio muted)")
         self.assertEqual(self.b.links_into(self.ns.cap_ff), set())   # semantics unchanged: nothing to Discord
         self.assertEqual(self.b.links_into(self.ns.cap_wf), set())
-        # the tray shows it as a warning notification
+        # the user's own click: no notification for the event itself …
         with mock.patch.object(ctl.tray, "isVisible", return_value=True), \
                 mock.patch.object(ctl.tray, "showMessage") as show:
             ctl._on_event("warning", events[-1][1])
+            show.assert_not_called()
+            # … but a silent Go Live stream is reported once (window closed)
+            ctl._status_alerts(st)
+            ctl._status_alerts(self.enf.refresh())
         show.assert_called_once()
+        self.assertEqual(show.call_args[0][1], "No app selected — the stream has no audio until you tick one")
         self.assertEqual(show.call_args[0][2], QSystemTrayIcon.MessageIcon.Warning)
         # ticking an app, then unticking it again while enforcing: warned again
         events.clear()
@@ -182,6 +201,96 @@ class TestTrayMenu(unittest.TestCase):
             self.assertEqual(self.enf.status.routing_text(), "Do Discorda: nic (dźwięk streamu wyciszony)")
         finally:
             i18n.set_language("en")
+
+    def test_notifications_only_for_unexpected_events(self):
+        from PySide6.QtWidgets import QSystemTrayIcon
+
+        from warpipe.tray import TrayController
+        self.enf.refresh()
+        ctl = TrayController(self.enf)
+        now = [1000.0]
+        with mock.patch.object(ctl.tray, "isVisible", return_value=True), \
+                mock.patch.object(ctl.tray, "showMessage") as show, \
+                mock.patch("warpipe.tray.time.monotonic", side_effect=lambda: now[0]):
+            # the user's own actions: silent (Go Live active, an app ticked, Whole system)
+            ctl.app_actions["Warframe.x64.exe"].trigger()
+            self.app.processEvents()
+            ctl.act_restore.trigger()
+            self.app.processEvents()
+            ctl.act_enforce.trigger()
+            self.app.processEvents()
+            for kind in ("applied", "restored", "capture_found", "warning"):
+                ctl._on_event(kind, "something")
+            show.assert_not_called()
+            # errors: shown, the same text at most once a minute
+            ctl._on_event("error", "pw-link failed")
+            ctl._on_event("error", "pw-link failed")
+            now[0] += 59
+            ctl._on_event("error", "pw-link failed")
+            self.assertEqual(show.call_count, 1)
+            self.assertEqual(show.call_args[0][2], QSystemTrayIcon.MessageIcon.Critical)
+            ctl._on_event("loop", "keeps relinking")
+            self.assertEqual(show.call_count, 2)
+            now[0] += 2
+            ctl._on_event("error", "pw-link failed")
+            self.assertEqual(show.call_count, 3)
+            # while the window is open: nothing at all
+            ctl.show_popup()
+            now[0] += 600
+            ctl._on_event("error", "pw-link failed")
+            ctl._on_event("loop", "keeps relinking")
+            self.assertEqual(show.call_count, 3)
+            ctl.popup.hide()
+
+    def test_silent_stream_once_per_go_live_session(self):
+        from warpipe.tray import TrayController
+        enf = Enforcer(self.fake, Config(Path(self.tmp.name) / "c4.json"),
+                       SnapshotStore(Path(self.tmp.name) / "s4.json"), enabled=True, selected=[])
+        ctl = TrayController(enf)
+        now = [1000.0]
+        with mock.patch.object(ctl.tray, "isVisible", return_value=True), \
+                mock.patch.object(ctl.tray, "showMessage") as show, \
+                mock.patch("warpipe.tray.time.monotonic", side_effect=lambda: now[0]):
+            for _i in range(3):                         # every refresh of the same session
+                ctl._status_alerts(enf.refresh())
+            self.assertEqual(show.call_count, 1)
+            b2, ns2 = self.b, self.ns
+            b2.remove_node(ns2.cap_wf)                  # Go Live ends …
+            b2.remove_node(ns2.cap_ff)
+            ctl._status_alerts(enf.refresh())
+            now[0] += 120
+            cap = b2.capture(target=ns2.firefox.serial)  # … and starts again
+            b2.connect(ns2.firefox, cap)
+            ctl._status_alerts(enf.refresh())
+            self.assertEqual(show.call_count, 2)
+            # seen in the open window: that counts, no notification later in the session
+            b2.remove_node(cap)
+            ctl._status_alerts(enf.refresh())
+            now[0] += 120
+            cap = b2.capture(target=ns2.firefox.serial)
+            b2.connect(ns2.firefox, cap)
+            ctl.show_popup()
+            ctl._status_alerts(enf.refresh())
+            ctl.popup.hide()
+            ctl._status_alerts(enf.refresh())
+            self.assertEqual(show.call_count, 2)
+
+    def test_ambiguous_detection_notifies_once(self):
+        from warpipe.tray import TrayController
+        b = GraphBuilder()
+        ns = with_apps(b, base_system(b))
+        for _i in range(2):
+            c = b.capture(node_name="Discord", app_name="Discord", media_name="RecordStream")
+            b.connect(ns.alsa, c, src_prefix="monitor")
+        enf = Enforcer(FakePw(b), Config(Path(self.tmp.name) / "c5.json"),
+                       SnapshotStore(Path(self.tmp.name) / "s5.json"))
+        ctl = TrayController(enf)
+        with mock.patch.object(ctl.tray, "isVisible", return_value=True), \
+                mock.patch.object(ctl.tray, "showMessage") as show:
+            ctl._status_alerts(enf.refresh())
+            ctl._status_alerts(enf.refresh())
+        show.assert_called_once()
+        self.assertIn("ambiguous", show.call_args[0][1])
 
     def test_about_to_show_rebuilds(self):
         from warpipe.tray import TrayController
