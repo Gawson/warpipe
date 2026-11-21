@@ -11,6 +11,9 @@ w strumieniach przechwytujących Discorda tylko wybrane aplikacje. Ty dalej sły
   wpuszcza, także w trybie **Cały system** (`warpipe --discord-sounds on` je wpuszcza);
 - interfejs jest domyślnie po angielsku; po polsku przy `LANG=pl_PL…` albo `"language": "pl"`
   w `~/.config/warpipe/config.json` (lub `WARPIPE_LANG=pl`);
-- opcjonalna wtyczka do OpenDecka (Stream Deck): przycisk na aplikację i „Cały system”.
+- opcjonalna wtyczka do OpenDecka (Stream Deck): przycisk na aplikację i „Cały system”;
+- Go Live gaśnie po powrocie do gry na pełnym ekranie? Udostępniaj cały ekran, nie okno gry: wiele
+  gier przy Alt+Tab z powrotem stawia okno od nowa i Discord traci udostępniane okno. Widzowie
+  zobaczą cały ekran, więc Discorda trzymaj na drugim monitorze.
 
 Pełna dokumentacja (po angielsku): [README.md](../README.md).

@@ -97,6 +97,16 @@ not yet with a real OpenDeck installation or real Stream Deck hardware.
 
 <p align="center"><img src="docs/assets/streamdeck-keys.png" width="360" alt="Stream Deck key states"></p>
 
+## Tips
+
+- **Go Live stops when you switch back to a fullscreen game?** Share the whole screen, not the game
+  window. Many fullscreen games set up their window again when you Alt+Tab back in; Discord then
+  loses the shared window and ends the stream. A shared screen keeps going, and Warpipe's audio
+  choice is the same either way. Viewers see everything on that screen, so keep Discord on another
+  monitor.
+- **What is Discord capturing right now?** `warpipe --list` shows Discord's capture streams and the
+  apps playing audio.
+
 ## Limitations
 
 - Linux + PipeWire + the **official** Discord client. Vesktop users already have a per-app picker (venmic).
