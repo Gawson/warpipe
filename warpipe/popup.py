@@ -423,6 +423,16 @@ class NoticeWidget(QFrame):
         self.icon.setPixmap(icon.pixmap(QSize(16, 16), self.devicePixelRatioF()))
 
 
+def _drop(layout, w: QWidget) -> None:
+    """Take a widget out of the window NOW. deleteLater() alone leaves it painted at
+    its old place until the event loop gets to it (or forever without one), on top
+    of whatever the layout puts there next."""
+    w.hide()
+    layout.removeWidget(w)
+    w.setParent(None)
+    w.deleteLater()
+
+
 class PopupWindow(QWidget):
     enforce_toggled = Signal(bool)
     app_toggled = Signal(str, bool)
@@ -592,27 +602,31 @@ class PopupWindow(QWidget):
         self.system_button.setEnabled(model.enabled)
 
         while len(self.notices) > len(model.notices):
-            w = self.notices.pop()
-            self.notice_box.removeWidget(w)
-            w.deleteLater()
+            _drop(self.notice_box, self.notices.pop())
         while len(self.notices) < len(model.notices):
-            w = NoticeWidget()
+            w = NoticeWidget(self)
             self.notice_box.addWidget(w)
+            w.show()          # now, not queued: _fit() below must measure it
             self.notices.append(w)
         for w, n in zip(self.notices, model.notices):
             w.set_notice(n)
 
         while len(self.rows) > len(model.rows):
-            w = self.rows.pop()
-            self.rows_layout.removeWidget(w)
-            w.deleteLater()
+            _drop(self.rows_layout, self.rows.pop())
         while len(self.rows) < len(model.rows):
-            w = AppRowWidget()
+            w = AppRowWidget(self.rows_widget)
             w.toggled.connect(self.app_toggled)
             self.rows_layout.addWidget(w)
+            w.show()
             self.rows.append(w)
         for w, r in zip(self.rows, model.rows):
             w.set_row(r, self._icon(r.icon_names))
+        for w in (*self.notices, *self.rows):
+            # style sheet borders and new texts must count in the size hints measured
+            # below — not only after the next event loop pass (a LayoutRequest)
+            w.ensurePolished()
+            w.layout().invalidate()
+            w.layout().activate()      # also clears the nested layouts' cached hints
         self.scroll.setVisible(bool(model.rows))
         self.empty.setVisible(not model.rows)
         self._fit()
@@ -629,7 +643,15 @@ class PopupWindow(QWidget):
             hs = [w.sizeHint().height() for w in self.rows]
             shown = hs[:MAX_VISIBLE_ROWS]
             self.scroll.setFixedHeight(sum(shown) + lay.spacing() * (len(shown) - 1))
+        else:
+            self.scroll.setFixedHeight(0)
         top = self.layout()
+        top.invalidate()
         top.activate()
         h = top.heightForWidth(WIDTH) if top.hasHeightForWidth() else top.sizeHint().height()
-        self.setFixedHeight(max(h, top.minimumSize().height()))
+        h = max(h, top.minimumSize().height())
+        if h != self.height() or self.minimumHeight() != h or self.maximumHeight() != h:
+            self.setFixedHeight(h)     # one resize per change (no intermediate sizes)
+        # Place the children for the final size right away — Qt defers the resize
+        # event of a hidden window, and nothing must be painted at stale positions.
+        top.setGeometry(self.rect())

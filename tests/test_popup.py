@@ -363,6 +363,116 @@ class TestPopupWindow(PopupCase):
         enf.refresh("graph changed")
         self.assertTrue(self.wait(lambda: ctl.popup.row("Spotify") is not None))
 
+    def assert_clean_layout(self, w, label="", rows=True):
+        """Fixed width; every shown child inside the window; no two shown siblings overlap
+        (window children, and the app rows); nothing removed is still painted."""
+        from PySide6.QtCore import QRect
+        from PySide6.QtWidgets import QWidget
+
+        from warpipe.popup import MAX_VISIBLE_ROWS, AppRowWidget, NoticeWidget
+
+        def shown(parent):
+            return [c for c in parent.findChildren(QWidget, options=Qt.FindChildOption.FindDirectChildrenOnly)
+                    if not c.isHidden() and not c.isWindow()]
+
+        self.assertEqual(w.width(), 420, label)
+        for parent in (w, w.rows_widget) if rows else (w,):
+            kids = shown(parent)
+            area = QRect(0, 0, parent.width(), parent.height())
+            for c in kids:
+                self.assertTrue(area.contains(c.geometry()), (label, c, c.geometry(), area))
+            for i, a in enumerate(kids):
+                for b in kids[i + 1:]:
+                    self.assertFalse(a.geometry().intersects(b.geometry()),
+                                     (label, a, a.geometry(), b, b.geometry()))
+        if rows and w.rows and len(w.rows) <= MAX_VISIBLE_ROWS:
+            # every row fully visible: no clipping, no scroll bar
+            self.assertGreaterEqual(w.scroll.viewport().height(), w.rows_layout.sizeHint().height(), label)
+            self.assertFalse(w.scroll.verticalScrollBar().isVisible(), label)
+        stale = [c for c in w.findChildren(NoticeWidget) if c not in w.notices]
+        stale += [c for c in w.findChildren(AppRowWidget) if c not in w.rows]
+        self.assertEqual([c for c in stale if not c.isHidden()], [], label)
+        for n in w.notices:
+            self.assertFalse(n.isHidden(), label)
+            self.assertFalse(n.geometry().intersects(w.section.geometry()), label)
+            self.assertLess(n.geometry().bottom(), w.section.geometry().top(), label)
+
+    def test_layout_stays_clean_through_transitions(self):
+        """Regression: the empty-selection notice stayed painted over "What the stream
+        hears" after it should have gone (Whole system → nothing ticked → tick → …)."""
+        b, ns = per_app()
+        enf = self.enforcer(b, enabled=False, selected=[])
+        ctl = self.controller(enf)
+        ctl.show_popup()
+        pop = ctl.popup
+        heights = {}
+
+        def step(label, action, notices):
+            action()
+            self.app.processEvents()
+            self.app.processEvents()
+            self.assertEqual(len(pop.notices), notices, label)
+            self.assert_clean_layout(pop, label)
+            heights[label] = pop.height()
+
+        step("whole system", lambda: None, 0)
+        step("only selected, nothing ticked", lambda: pop.master.click(), 1)
+        step("+warframe", lambda: pop.row("Warframe.x64.exe").switch.click(), 0)
+        step("+firefox", lambda: pop.row("Firefox").switch.click(), 0)
+        step("untick all", lambda: (pop.row("Firefox").switch.click(),
+                                    self.app.processEvents(),
+                                    pop.row("Warframe.x64.exe").switch.click()), 1)
+        step("whole system again", lambda: pop.system_button.click(), 0)
+        self.assertEqual(heights["whole system"], heights["+warframe"])
+        self.assertEqual(heights["whole system"], heights["whole system again"])
+        self.assertGreater(heights["only selected, nothing ticked"], heights["whole system"])
+        self.assertEqual(heights["only selected, nothing ticked"], heights["untick all"])
+        # apps appear and go away while the window is open; a very long name; no capture
+        long = "A" * 40 + " very long application name that never fits.exe"
+        step("new apps", lambda: (b.app(long, "longapp"), b.app("Spotify", "spotify"),
+                                  enf.refresh("graph changed")), 0)
+        self.assertEqual(len(pop.rows), 5)
+        self.assertLess(pop.row(long).name.width(), 300)       # elided, not wider
+        step("apps gone", lambda: (b.remove_node(ns.firefox), b.remove_node(ns.java),
+                                   enf.refresh("graph changed")), 0)
+        self.assertEqual(len(pop.rows), 3)
+        step("Go Live ended", lambda: (b.remove_node(ns.cap_wf), b.remove_node(ns.cap_ff),
+                                       enf.refresh("graph changed")), 0)
+        self.assertEqual(pop.pill.text(), "No Go Live audio")
+
+    def test_set_model_is_clean_without_an_event_loop(self):
+        """Removed widgets go away at once — not only when deleteLater() gets its turn."""
+        from warpipe.popup import PopupWindow, popup_model
+        b, _ns = per_app()
+        enf = self.enforcer(b, enabled=True, selected=[])
+        w = PopupWindow()
+        try:
+            w.set_model(popup_model(enf.refresh()))
+            self.assertEqual(len(w.notices), 1)
+            h_notice = w.height()
+            enf.set_app_selected("Firefox", True)
+            w.set_model(popup_model(enf.refresh()))
+            self.assertEqual(w.notices, [])
+            # rows: positioned by the scroll area's own (deferred) resize — checked shown
+            self.assert_clean_layout(w, "no event loop", rows=False)
+            self.assertLess(w.height(), h_notice)
+            measured = w.height()
+            w.show()                               # sizes measured before showing are final
+            self.app.processEvents()
+            self.assertEqual(w.height(), measured)
+            self.assert_clean_layout(w, "shown with rows")
+            w.hide()
+            w.set_model(popup_model(Status(None, [], True, [], error="x")))
+            self.assertEqual(w.rows, [])
+            self.assertFalse(w.empty.isHidden())
+            self.assert_clean_layout(w, "no rows", rows=False)
+            w.show()
+            self.app.processEvents()
+            self.assert_clean_layout(w, "shown")
+            w.hide()
+        finally:
+            w.deleteLater()
+
     def test_hidden_window_is_not_rebuilt(self):
         b, _ns = per_app()
         enf = self.enforcer(b)
