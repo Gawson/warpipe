@@ -44,18 +44,6 @@ A popup window with live per-app status is planned for v0.2:
 
 <p align="center"><img src="docs/assets/popup-preview-v0.2.png" width="760" alt="Mockup of the planned v0.2 popup window, dark and light theme"></p>
 
-## Stream Deck / OpenDeck
-
-Warpipe ships a plugin for [OpenDeck](https://github.com/nekename/OpenDeck) (Elgato Stream Deck on Linux):
-
-<p align="center"><img src="docs/assets/streamdeck-keys.png" width="640" alt="Key states: app not playing, available, on stream, whole system, Warpipe not running"></p>
-
-- **App audio** key — configure it with an app (e.g. your game). Grey while the app is not playing,
-  green when available, glowing when it is on stream. Press to add/remove it.
-- **Whole system** key — back to Discord's default (everything is shared).
-
-The plugin talks to the running Warpipe over a local socket; it never rewires audio by itself.
-
 ## Install
 
 Requirements: Linux with PipeWire + WirePlumber, Python 3, PySide6 (`python3-pyside6` on Fedora),
@@ -72,9 +60,6 @@ Then start **Warpipe** from your application menu, or run `warpipe`.
 Uninstall with `./uninstall.sh` (add `--purge` to also remove settings). A running Warpipe restores
 Discord's original links when it exits.
 
-OpenDeck plugin: run `opendeck-plugin/build.sh`, then in OpenDeck open **Plugins → Install from file**
-and pick `opendeck-plugin/dist/io.github.gawson.warpipe.streamDeckPlugin`.
-
 ## Command line
 
 | Command | What it does |
@@ -90,6 +75,14 @@ and pick `opendeck-plugin/dist/io.github.gawson.warpipe.streamDeckPlugin`.
 
 Settings live in `~/.config/warpipe/config.json` (selected apps, enforcement on start, language:
 `auto`, `en` or `pl`).
+
+## Extras: Stream Deck (OpenDeck)
+
+Optional plugin for [OpenDeck](https://github.com/nekename/OpenDeck): one key per app
+(grey when not playing, glowing when on stream, press to toggle) and a **Whole system** key.
+Build it with `opendeck-plugin/build.sh` and use **Plugins → Install from file** in OpenDeck.
+
+<p align="center"><img src="docs/assets/streamdeck-keys.png" width="360" alt="Stream Deck key states"></p>
 
 ## Limitations
 
