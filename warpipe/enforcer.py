@@ -34,11 +34,27 @@ from .planner import (AppEntry, Detection, DetectConfig, Op, apps_in_stream,
                       detect, link_entry, list_apps, plan_apply, plan_restore,
                       snapshot_originals, status_label)
 from .pw import PwError
-from .state import Config, SnapshotStore
+from .state import Config, SnapshotStore, is_utf8_text
 
 log = logging.getLogger("warpipe")
 
 _UNSET = object()
+
+
+class InvalidAppName(ValueError):
+    """An app name that can't be stored or sent (empty, or not valid UTF-8 text)."""
+
+
+class AppNotPlaying(Exception):
+    """Refused: turning on an app that is not playing (require_present=True).
+
+    In "Whole system" mode that would mean "only this app" — a typo would silence
+    the whole stream. `status` is the state after a fresh look at the graph."""
+
+    def __init__(self, key: str, status: "Status") -> None:
+        super().__init__(_("App “{app}” is not playing right now — not changing anything.").format(app=key))
+        self.key = key
+        self.status = status
 
 
 @dataclass
@@ -129,6 +145,9 @@ class Enforcer:
         self._apply_times: deque[float] = deque()
         self._paused_until = 0.0
         self._last_error: str | None = None
+        # Set when switching to "Whole system" could not restore the original links;
+        # shown as the status error (while enforcement is off) until a restore succeeds.
+        self._restore_error: str | None = None
         # Extra status listeners (e.g. the control channel). Called from the thread
         # that refreshed the state — they must be fast and must not block (ideally:
         # just set a flag and wake their own thread).
@@ -176,7 +195,7 @@ class Enforcer:
         self.config.enforce = self.enabled
         try:
             self.config.save()
-        except OSError as e:
+        except (OSError, ValueError) as e:  # ValueError: e.g. text that can't be encoded
             self._emit("error", _("Can't save settings: {error}").format(error=e))
 
     def _dump(self) -> Graph:
@@ -303,6 +322,9 @@ class Enforcer:
             warnings = list(det.warnings)
             if self.clock() < self._paused_until:
                 warnings.append(_("Something keeps changing the links (Discord/WirePlumber?) — paused for a moment."))
+            if error is None and not self.enabled and self._restore_error:
+                # "Whole system" without the original links back must not look fine
+                error = self._restore_error
             return self._publish(Status(
                 detection=det, apps=apps, enabled=self.enabled, selected=list(self.selected),
                 error=error, warnings=warnings, last_action=action,
@@ -442,6 +464,7 @@ class Enforcer:
                 self.store.save()
             except OSError:
                 pass
+            self._restore_error = None
             return True, _("restored {created}, removed {deleted}").format(created=created, deleted=deleted)
 
     # ---------------------------------------------------------- UI/CLI actions
@@ -462,11 +485,21 @@ class Enforcer:
             if ok:
                 self._emit("restored", _("All system audio goes to Discord."))
             else:
-                self._emit("error", _("Restore failed: {error}").format(error=msg))
+                self._restore_error = _("Restore failed: {error}").format(error=msg)
+                self._emit("error", self._restore_error)
+            # A failed restore stays in the status (error) until a restore succeeds,
+            # so callers (control channel, CLI, plugin) don't report success.
             return self.refresh("after restore")
+
+    @staticmethod
+    def _check_key(key) -> None:
+        """Refuse a name that could never be saved or sent — BEFORE any state changes."""
+        if not isinstance(key, str) or not key.strip() or not is_utf8_text(key):
+            raise InvalidAppName(_("Invalid app name (it must be non-empty UTF-8 text)."))
 
     def set_app_selected(self, key: str, on: bool) -> Status:
         with self._lock:
+            self._check_key(key)
             sel = [k for k in self.selected if k.casefold() != key.casefold()]
             if on:
                 sel.append(key)
@@ -482,6 +515,8 @@ class Enforcer:
 
     def set_selected(self, keys: list[str]) -> None:
         with self._lock:
+            for k in keys:
+                self._check_key(k)
             self.selected = list(keys)
 
     # ------------------------------------------------ toggling a single app
@@ -491,6 +526,9 @@ class Enforcer:
     #  - enforcement on, X selected → unselect X; if nothing is left selected →
     #    back to "Whole system" (disable + restore);
     #  - enforcement on, X not selected → add X.
+    # require_present=True (`--toggle` without --force, the plugin's key pressed while
+    # Warpipe was not running): turning X on is refused with AppNotPlaying unless X
+    # is playing right now — a typo must not cut every app out of the stream.
 
     def is_app_effective(self, key: str) -> bool:
         """Is X currently in effect (enforcement on and X selected)?"""
@@ -508,16 +546,39 @@ class Enforcer:
                 return k
         return key
 
-    def toggle_app(self, key: str) -> tuple[Status, str]:
-        with self._lock:
-            key = self._canonical_key(key)
-            return self._set_app_effective(key, not self.is_app_effective(key))
+    def _is_present(self, key: str) -> bool:
+        cf = key.casefold()
+        return any(a.key.casefold() == cf for a in self.status.apps)
 
-    def set_app(self, key: str, on: bool) -> tuple[Status, str]:
+    def _require_present(self, key: str) -> str:
+        """Returns the canonical key of a playing app; raises AppNotPlaying otherwise.
+
+        The status may be stale (or not refreshed yet right after start-up), so an
+        app that is not in it is looked up once more in a fresh pw-dump."""
+        if not self._is_present(key):
+            st = self.refresh("checking the app")
+            key = self._canonical_key(key)
+            if not self._is_present(key):
+                raise AppNotPlaying(key, st)
+        return key
+
+    def toggle_app(self, key: str, require_present: bool = False) -> tuple[Status, str]:
         with self._lock:
+            self._check_key(key)
+            key = self._canonical_key(key)
+            on = not self.is_app_effective(key)
+            if on and require_present:
+                key = self._require_present(key)
+            return self._set_app_effective(key, on)
+
+    def set_app(self, key: str, on: bool, require_present: bool = False) -> tuple[Status, str]:
+        with self._lock:
+            self._check_key(key)
             key = self._canonical_key(key)
             if self.is_app_effective(key) == bool(on):
                 return self.status, _("No change: {routing}").format(routing=self._routing_text())
+            if on and require_present:
+                key = self._require_present(key)
             return self._set_app_effective(key, bool(on))
 
     def _set_app_effective(self, key: str, on: bool) -> tuple[Status, str]:
@@ -536,6 +597,9 @@ class Enforcer:
         if not remaining:
             self.selected = []
             st = self.set_enabled(False)
+            if st.error:
+                # restore failed (st.error says why) — don't claim the whole system is back
+                return st, _("Removed {app}.").format(app=key)
             return st, _("Removed {app}. Nothing is selected, so all system audio goes to Discord.").format(app=key)
         st = self.set_app_selected(key, False)
         return st, _("Removed {app}.").format(app=key) + " " + self._routing_text()
@@ -563,7 +627,7 @@ class Enforcer:
             return
         try:
             self.config.save()
-        except OSError as e:
+        except (OSError, ValueError) as e:
             self._emit("error", _("Can't save settings: {error}").format(error=e))
         self.dcfg = dataclasses.replace(self.dcfg, confirmed=tuple(self.config.confirmed_captures))
         log.info("remembered the confirmed stream: %s",

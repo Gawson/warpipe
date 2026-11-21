@@ -82,6 +82,10 @@ Optional plugin for [OpenDeck](https://github.com/nekename/OpenDeck): one key pe
 (grey when not playing, glowing when on stream, press to toggle) and a **Whole system** key.
 Build it with `opendeck-plugin/build.sh` and use **Plugins → Install from file** in OpenDeck.
 
+Testing status: so far the plugin has only been tested against a fake OpenDeck harness
+(`tests/fake_opendeck.py`) that implements the Stream Deck SDK protocol the way OpenDeck 2.14 does —
+not yet with a real OpenDeck installation or real Stream Deck hardware.
+
 <p align="center"><img src="docs/assets/streamdeck-keys.png" width="360" alt="Stream Deck key states"></p>
 
 ## Limitations

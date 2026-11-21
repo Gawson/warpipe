@@ -426,6 +426,7 @@ def scenario() -> None:
     os.chmod(launcher, 0o755)
     od.did_receive_global_settings({"toolPath": launcher})
     time.sleep(0.3)
+    n2_pressed = time.monotonic()
     od.key_down(kg, ACTION_APP, keys[kg])
     check("N2 naciśnięcie przy wyłączonym narzędziu: „uruchamiam…”", lambda: imgs({kg: "app:starting"}, 3))
     check("N2 wtyczka uruchomiła program z --tray (bez powłoki)",
@@ -435,21 +436,49 @@ def scenario() -> None:
           lambda: imgs({kg: "app:on", km: "app:off", kb: "app:off", ks: "system:sys_off"}, 15))
     check("N3 pw-dump: capG <- game, capM puste (zapamiętany wybór zastosowany)",
           lambda: wait(lambda: inbound_src(cap_g) == {GAME} and inbound_src(cap_m) == set(), 5))
-    relaunched = None
-    with open(os.path.join(TMP, "pids")) as f:
-        for line in f:
-            pid, _, name = line.strip().partition(" ")
-            if name == "relaunched-watch":
-                relaunched = int(pid)
+    def relaunched_pids() -> list[int]:
+        out = []
+        with open(os.path.join(TMP, "pids")) as f:
+            for line in f:
+                pid, _, name = line.strip().partition(" ")
+                if name == "relaunched-watch":
+                    out.append(int(pid))
+        return out
+
+    def stopped(pid: int) -> bool:
+        return not os.path.exists(f"/proc/{pid}") or open(f"/proc/{pid}/stat").read().split()[2] == "Z"
+
+    relaunched = (relaunched_pids() or [None])[-1]
     check("N3 nowe narzędzie działa w osobnej sesji (nie jako dziecko wtyczki)",
           relaunched is not None and os.getsid(relaunched) == relaunched)
     if relaunched:
         os.kill(relaunched, signal.SIGTERM)
-        check("N4 zatrzymanie uruchomionego narzędzia", lambda: wait(lambda: not os.path.exists(f"/proc/{relaunched}")
-                                                                     or open(f"/proc/{relaunched}/stat").read().split()[2] == "Z", 8))
+        check("N4 zatrzymanie uruchomionego narzędzia", lambda: wait(lambda: stopped(relaunched), 8))
         check("N4 przyciski znowu czerwone", lambda: imgs({kg: "app:down"}))
         check("N4 wyjście przywróciło music, brak naszych",
               lambda: wait(lambda: inbound_src(cap_m) == {MUSIC} and ours_count() == 0, 5))
+
+    # "Whole system" pressed while the tool is down (saved config: enforce + [game]): the
+    # started tool must end in "Whole system", not in the saved selection (review finding).
+    time.sleep(max(0.0, 5.5 - (time.monotonic() - n2_pressed)))   # plugin's launch cooldown
+    n_before = len(relaunched_pids())
+    od.key_down(ks, ACTION_SYSTEM, {})
+    check("N5 „Cały system” przy wyłączonym narzędziu: uruchamia je",
+          lambda: wait(lambda: len(relaunched_pids()) > n_before, 5))
+    check("N5 po starcie: „Cały system” (game/music/browser na streamie), a nie zapisany wybór",
+          lambda: imgs({ks: "system:sys_on", kg: "app:on", km: "app:on"}, 15))
+    check("N5 pw-dump: capG <- game, capM <- music, brak naszych",
+          lambda: wait(lambda: inbound_src(cap_g) == {GAME} and inbound_src(cap_m) == {MUSIC}
+                       and ours_count() == 0, 5))
+    with open(os.path.join(CONFIG_DIR, "config.json")) as f:
+        cfg = json.load(f)
+    check("N5 konfiguracja: enforce=false (wybór zapamiętany)",
+          cfg.get("enforce") is False and cfg.get("selected_apps") == [GAME])
+    pids = relaunched_pids()
+    if len(pids) > n_before:
+        os.kill(pids[-1], signal.SIGTERM)
+        check("N5 zatrzymanie narzędzia", lambda: wait(lambda: stopped(pids[-1]), 8))
+        check("N5 przyciski znowu czerwone", lambda: imgs({kg: "app:down", ks: "system:down"}))
 
     # ------------------------------------------------------------ koniec OpenDeck
     proc = od.proc

@@ -40,9 +40,11 @@ class TestParse(unittest.TestCase):
     def test_valid(self):
         self.assertEqual(parse_request(b'{"cmd":"status"}'), {"cmd": "status", "id": None})
         self.assertEqual(parse_request('{"cmd":"toggle","app":" Warframe.x64.exe ","id":7}'),
-                         {"cmd": "toggle", "id": 7, "app": "Warframe.x64.exe"})
+                         {"cmd": "toggle", "id": 7, "app": "Warframe.x64.exe", "require_present": False})
         self.assertEqual(parse_request(b'{"cmd":"set","app":"Firefox","on":"off","id":"a1"}'),
-                         {"cmd": "set", "id": "a1", "app": "Firefox", "on": False})
+                         {"cmd": "set", "id": "a1", "app": "Firefox", "on": False, "require_present": False})
+        self.assertTrue(parse_request(b'{"cmd":"toggle","app":"Firefox","require_present":true}')
+                        ["require_present"])
         self.assertTrue(parse_request(b'{"cmd":"set","app":"Firefox","on":true}')["on"])
         self.assertEqual(parse_request(b'{"cmd":"system"}')["cmd"], "system")
         self.assertEqual(parse_request(b'{"cmd":"subscribe"}')["cmd"], "subscribe")
@@ -70,10 +72,27 @@ class TestParse(unittest.TestCase):
             b'{"cmd":"set","app":"Firefox","on":1}',
             b'{"cmd":"rm -rf /"}',
             b"x" * (MAX_LINE + 1),
+            b'{"cmd":"toggle","app":"Firefox","require_present":"yes"}',
+            b'{"cmd":"set","app":"Firefox","on":true,"require_present":1}',
         ]
         for line in bad:
             with self.assertRaises(ProtocolError, msg=line[:60]):
                 parse_request(line)
+
+    def test_poison_text_refused(self):
+        """Review finding: lone surrogates, C1 controls and line/paragraph separators
+        must never reach the Enforcer (they broke config saving and every later push)."""
+        poison = ["\ud800", "\udcff", "Fire\ud83dfox", "a\u0085b", "a\u009bb", "a b", "a b",
+                  "a\x7fb", "a\x1bb"]
+        for app in poison:
+            for line in (json.dumps({"cmd": "toggle", "app": app}).encode(),            # \uXXXX escapes
+                         json.dumps({"cmd": "toggle", "app": app}, ensure_ascii=False)):  # raw str
+                with self.assertRaises(ProtocolError, msg=repr(app)) as cm:
+                    parse_request(line)
+                str(cm.exception).encode("utf-8")   # the error text itself is sendable
+        # ordinary non-ASCII names still work (incl. emoji and joiners)
+        for ok in ("Gra Łódź.exe", "🎮 game", "a‍b", "日本語"):
+            self.assertEqual(parse_request(json.dumps({"cmd": "toggle", "app": ok}).encode())["app"], ok)
 
     def test_unknown_command_keeps_id_and_is_readable(self):
         with self.assertRaises(ProtocolError) as cm:
@@ -458,6 +477,239 @@ class TestServer(SockBase):
         self.assertEqual(stat.S_IMODE(os.stat(self.run_dir).st_mode), 0o700)
 
 
+class TestPoisonDoesNotBreakTheChannel(SockBase):
+    """Review finding (major): one line with a lone surrogate used to kill the notify
+    thread, break status/subscribe and the tray's "Whole system". Now it is refused and
+    everything keeps working."""
+
+    def test_poison_toggle_then_everything_still_works(self):
+        b, ns = per_app()
+        before = b.all_link_pairs()
+        enf = self.make(b, enabled=False)
+        enf.refresh()
+        self.serve(enf)
+        sub, fsub = self.connect()
+        try:
+            self.assertTrue(self.ask(fsub, sub, {"cmd": "subscribe", "id": "sub"})["ok"])
+            # Warframe only (links change), like in the reported scenario
+            self.assertTrue(request({"cmd": "toggle", "app": "Warframe.x64.exe"}, self.path)["ok"])
+            self.assertEqual(json.loads(fsub.readline())["type"], "status")
+            self.assertEqual(self.inbound(b, ns.cap_ff), set())
+            # the poison lines, sent raw (escaped surrogates) on their own connection
+            s, f = self.connect()
+            try:
+                for raw in (b'{"cmd":"toggle","app":"\\ud800","id":1}\n',
+                            b'{"cmd":"set","app":"\\udcff","on":true,"id":2}\n',
+                            b'{"cmd":"toggle","app":"x\\u2028y","id":3}\n'):
+                    s.sendall(raw)
+                    r = json.loads(f.readline())
+                    self.assertFalse(r["ok"], r)
+                    self.assertIn("invalid text", r["error"])
+                # the same connection still answers
+                self.assertTrue(self.ask(f, s, {"cmd": "status"})["ok"])
+            finally:
+                s.close()
+            self.assertEqual(enf.selected, ["Warframe.x64.exe"])
+            self.assertEqual(self.saved()["selected_apps"], ["Warframe.x64.exe"])
+            # the subscriber still gets pushes; new status/subscribe connections work
+            enf.refresh()
+            self.assertTrue(request({"cmd": "toggle", "app": "Firefox"}, self.path)["ok"])
+            push = json.loads(fsub.readline())
+            self.assertEqual(push["type"], "status")
+            self.assertTrue({a["key"]: a for a in push["status"]["apps"]}["Firefox"]["selected"])
+            self.assertTrue(request({"cmd": "status"}, self.path)["ok"])
+            s2, f2 = self.connect()
+            self.assertTrue(self.ask(f2, s2, {"cmd": "subscribe"})["ok"])
+            s2.close()
+        finally:
+            sub.close()
+        # the tray's "Whole system (restore)" still restores
+        st = enf.set_enabled(False)
+        self.assertIsNone(st.error)
+        self.assertEqual(b.all_link_pairs(), before)
+        self.assertIs(self.saved()["enforce"], False)
+
+    def test_enforcer_refuses_unencodable_name_before_changing_state(self):
+        from warpipe.enforcer import InvalidAppName
+        b, ns = per_app()
+        enf = self.make(b, enabled=True, selected=["Warframe.x64.exe"])
+        enf.refresh()
+        h = ControlHandler(enf)
+        # straight into the handler (past the parser): still refused, nothing changed
+        r = h.handle({"cmd": "toggle", "app": "\ud800"})
+        self.assertEqual((r["ok"], r["code"]), (False, "invalid_app"))
+        r = h.handle({"cmd": "set", "app": "\udcff", "on": True})
+        self.assertFalse(r["ok"])
+        self.assertEqual((enf.enabled, enf.selected), (True, ["Warframe.x64.exe"]))
+        with self.assertRaises(InvalidAppName):
+            enf.set_app_selected("\ud800", True)
+        self.assertEqual(enf.selected, ["Warframe.x64.exe"])
+        self.assertFalse(self.cfg_path.exists())     # nothing was saved either
+
+    def test_bad_name_in_memory_or_config_does_not_crash(self):
+        """Defence in depth: even if such a name got in (hand-edited config, odd graph name),
+        saving, the state JSON and "Whole system" keep working."""
+        from warpipe.control import _dumps
+        b, ns = per_app()
+        before = b.all_link_pairs()
+        (self.dir / "config.json").write_text(
+            '{"version": 1, "enforce": true, "selected_apps": ["\\ud800", "Warframe.x64.exe"]}')
+        enf = self.make(b)
+        self.assertEqual(enf.selected, ["Warframe.x64.exe"])       # dropped when loading
+        enf.refresh()
+        self.assertEqual(self.inbound(b, ns.cap_ff), set())
+        enf.selected = ["\ud800", "Warframe.x64.exe"]                # forced in anyway
+        data = _dumps(status_to_dict(enf.refresh()))
+        json.loads(data.decode("utf-8"))                             # valid UTF-8 JSON, no exception
+        enf._save_config()                                           # no exception
+        st = enf.set_enabled(False)                                  # like the tray menu
+        self.assertFalse(enf.enabled)
+        self.assertIsNone(st.error)
+        self.assertEqual(b.all_link_pairs(), before)
+
+    def test_config_save_error_does_not_stop_restore(self):
+        b, ns = per_app()
+        before = b.all_link_pairs()
+        enf = self.make(b, enabled=True, selected=["java"])
+        enf.refresh()
+        self.assertNotEqual(b.all_link_pairs(), before)
+        with mock.patch.object(Config, "save", side_effect=ValueError("cannot encode")):
+            st = enf.set_enabled(False)
+        self.assertEqual(b.all_link_pairs(), before)
+        self.assertIsNone(st.error)
+        self.assertTrue(any(k == "error" and "Can't save settings" in m for k, m in self.events))
+
+    def test_notify_thread_and_client_survive_handler_errors(self):
+        b, ns = per_app()
+        enf = self.make(b, enabled=False)
+        enf.refresh()
+        srv = self.serve(enf)
+        s, f = self.connect()
+        try:
+            self.assertTrue(self.ask(f, s, {"cmd": "subscribe"})["ok"])
+            real = srv.handler.status
+            calls = {"n": 0}
+
+            def flaky():
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    raise UnicodeEncodeError("utf-8", "\ud800", 0, 1, "surrogates not allowed")
+                return real()
+
+            def broken():
+                raise RuntimeError("boom")
+
+            with self.assertLogs("warpipe", level="ERROR") as logs:
+                srv.handler.status = flaky
+                b.app("Spotify", "spotify")
+                enf.refresh()                       # push #1 fails inside the notify thread
+                self.assertTrue(wait_for(lambda: calls["n"] >= 1))
+                time.sleep(0.1)
+                enf.toggle_app("Firefox")           # push #2 must still arrive
+                push = json.loads(f.readline())
+                self.assertEqual(push["type"], "status")
+                self.assertTrue(push["status"]["enforce"])
+                # an exception while answering subscribe: error reply, connection kept
+                srv.handler.status = broken
+                r = self.ask(f, s, {"cmd": "subscribe"})
+                self.assertFalse(r["ok"])
+                self.assertIn("internal error", r["error"])
+                srv.handler.status = real
+                self.assertTrue(self.ask(f, s, {"cmd": "status"})["ok"])
+            text = "\n".join(logs.output)
+            self.assertIn("pushing the state failed", text)
+            self.assertIn("error while handling a request", text)
+        finally:
+            s.close()
+
+
+class TestRestoreFailureReported(Base):
+    """Review finding: a failed restore used to be answered with ok: true and
+    "all system audio goes to Discord"."""
+
+    def test_last_app_off_with_failed_restore(self):
+        b, ns = per_app()
+        enf = self.make(b, enabled=False)
+        enf.refresh()
+        h = ControlHandler(enf)
+        self.assertTrue(h.handle({"cmd": "toggle", "app": "Warframe.x64.exe"})["ok"])
+        self.fake.fail_link = True
+        r = h.handle({"cmd": "toggle", "app": "Warframe.x64.exe"})
+        self.assertFalse(r["ok"], r)
+        self.assertIn("Restore failed", r["error"])
+        self.assertNotIn("all system audio", r.get("message", ""))
+        self.assertFalse(enf.enabled)
+        self.assertEqual(self.inbound(b, ns.cap_ff), set())       # really not restored
+        self.assertIn(("error", r["error"]), self.events)
+        # the error stays visible (status, plugin keys) until a restore works
+        self.assertIn("Restore failed", h.handle({"cmd": "status"})["status"]["error"])
+        self.assertIn("Restore failed", enf.refresh().error)
+        # "Whole system" again = retry
+        r = h.handle({"cmd": "system"})
+        self.assertFalse(r["ok"])
+        self.assertNotIn("message", r)
+        self.fake.fail_link = False
+        r = h.handle({"cmd": "system"})
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(r["message"], "All system audio goes to Discord.")
+        self.assertNotIn("error", r["status"])
+        self.assertEqual(self.inbound(b, ns.cap_ff), {ns.firefox.id})
+
+    def test_enabling_again_hides_the_old_restore_error(self):
+        b, ns = per_app()
+        enf = self.make(b, enabled=True, selected=["java"])
+        enf.refresh()
+        self.fake.fail_link = True
+        self.assertIsNotNone(enf.set_enabled(False).error)
+        self.fake.fail_link = False
+        self.assertIsNone(enf.set_enabled(True).error)
+
+
+class TestRequirePresent(Base):
+    """Review finding: --toggle with a typo in "Whole system" cut every app out of the stream."""
+
+    def test_absent_app_refused_in_whole_system(self):
+        from warpipe.enforcer import AppNotPlaying
+        b, ns = per_app()
+        before = b.all_link_pairs()
+        enf = self.make(b, enabled=False)
+        enf.refresh()
+        with self.assertRaises(AppNotPlaying) as cm:
+            enf.toggle_app("Firefx", require_present=True)
+        self.assertIn("Firefx", str(cm.exception))
+        self.assertEqual((enf.enabled, enf.selected), (False, []))
+        self.assertEqual(self.fake.mutations, [])
+        self.assertEqual(b.all_link_pairs(), before)
+        r = ControlHandler(enf).handle({"cmd": "set", "app": "Firefx", "on": True, "require_present": True})
+        self.assertEqual((r["ok"], r["code"]), (False, "not_playing"))
+        self.assertIn("Firefox", {a["key"] for a in r["status"]["apps"] if a["present"]})
+        self.assertEqual(b.all_link_pairs(), before)
+        # without the flag the protocol behaves as before (pre-selecting, e.g. with --force)
+        enf.set_enabled(True)
+        enf.toggle_app("Firefx")
+        self.assertIn("Firefx", enf.selected)
+
+    def test_present_or_turning_off_allowed(self):
+        b, ns = per_app()
+        enf = self.make(b, enabled=True, selected=["Spotify", "java"])   # Spotify is not playing
+        enf.refresh()
+        enf.toggle_app("spotify", require_present=True)                   # turning OFF: no check
+        self.assertEqual(enf.selected, ["java"])
+        enf.toggle_app("firefox", require_present=True)                   # playing: case-insensitive
+        self.assertEqual(enf.selected, ["Firefox", "java"])
+        st, msg = enf.set_app("FIREFOX", True, require_present=True)      # already on: no change
+        self.assertIn("No change", msg)
+
+    def test_stale_status_is_rechecked(self):
+        b, ns = per_app()
+        enf = self.make(b, enabled=False)       # never refreshed: the status has no apps yet
+        enf.toggle_app("Firefox", require_present=True)
+        self.assertEqual((enf.enabled, enf.selected), (True, ["Firefox"]))
+        b.app("Spotify", "spotify")             # appeared after the last refresh
+        enf.toggle_app("Spotify", require_present=True)
+        self.assertEqual(enf.selected, ["Firefox", "Spotify"])
+
+
 class TestCliRemote(SockBase):
     def setUp(self):
         super().setUp()
@@ -515,6 +767,59 @@ class TestCliRemote(SockBase):
             self.run_cli("--toggle", "x", "--json")
         with self.assertRaises(SystemExit):
             self.run_cli("--toggle", "  ")
+        with self.assertRaises(SystemExit):
+            self.run_cli("--status", "--force")
+
+    def test_toggle_name_not_utf8_is_a_usage_error(self):
+        """Review finding: `warpipe --toggle $'\\xff'` crashed with a UnicodeEncodeError traceback."""
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), self.assertRaises(SystemExit) as cm:
+            cli.main(["--toggle", "\udcff"])     # what Python makes of the argv byte 0xff
+        self.assertEqual(cm.exception.code, cli.EXIT_USAGE)
+        self.assertIn("not valid UTF-8", err.getvalue())
+        with self.assertRaises(ControlError):    # the library refuses to send it, too
+            request({"cmd": "toggle", "app": "\udcff"}, self.path)
+
+    def test_toggle_typo_in_whole_system_refused(self):
+        """Review finding: `--toggle Firefx` in "Whole system" silenced the stream with exit code 0.
+        Now like --apply with a typo: exit code 2, nothing changed, the playing apps listed."""
+        b, ns = per_app()
+        before = b.all_link_pairs()
+        enf = self.make(b, enabled=False)
+        enf.refresh()
+        self.serve(enf)
+        rc, out, err = self.run_cli("--toggle", "Firefx")
+        self.assertEqual(rc, cli.EXIT_USAGE, (out, err))
+        self.assertIn("Firefx", err)
+        self.assertIn("is not playing right now", err)
+        self.assertIn("Firefox", err)                 # the names that would work
+        self.assertIn("--force", err)
+        self.assertEqual(self.fake.mutations, [])
+        self.assertEqual(b.all_link_pairs(), before)
+        self.assertEqual((enf.enabled, enf.selected), (False, []))
+        # turning OFF a remembered app that isn't playing needs no --force
+        rc, out, err = self.run_cli("--toggle", "firefox")
+        self.assertEqual(rc, 0, err)
+        rc, out, err = self.run_cli("--toggle", "Spotify", "--force")   # pre-select before it starts
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(enf.selected, ["Firefox", "Spotify"])
+        rc, out, err = self.run_cli("--toggle", "Spotify")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(enf.selected, ["Firefox"])
+
+    def test_system_with_failed_restore_is_an_error(self):
+        b, ns = per_app()
+        enf = self.make(b, enabled=True, selected=["java"])
+        enf.refresh()
+        self.serve(enf)
+        self.fake.fail_link = True
+        rc, out, err = self.run_cli("--system")
+        self.assertEqual(rc, cli.EXIT_ERROR)
+        self.assertIn("Restore failed", err)
+        self.assertNotIn("all system audio", out)
+        self.fake.fail_link = False
+        rc, out, err = self.run_cli("--system")
+        self.assertEqual(rc, 0, err)
 
 
 class TestWatchModeControl(unittest.TestCase):

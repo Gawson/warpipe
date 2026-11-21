@@ -193,12 +193,18 @@ PL: dict[str, str] = {
     "Removed {app}.": "Odznaczono {app}.",
     "Removed {app}. Nothing is selected, so all system audio goes to Discord.":
         "Odznaczono {app}. Nic nie jest zaznaczone, więc do Discorda idzie cały dźwięk systemu.",
+    "App “{app}” is not playing right now — not changing anything.":
+        "Aplikacja „{app}” teraz nie gra — nic nie zmieniam.",
+    "Invalid app name (it must be non-empty UTF-8 text).":
+        "Niepoprawna nazwa aplikacji (musi to być niepusty tekst UTF-8).",
 
     # ---- control channel
     "field {field} must be a string": "pole {field} musi być tekstem",
     "field {field} is empty": "puste pole {field}",
     "field {field} is too long (max {limit} characters)": "pole {field} jest za długie (maks. {limit} znaków)",
-    "field {field} contains control characters": "pole {field} zawiera znaki sterujące",
+    "field {field} contains control characters or invalid text":
+        "pole {field} zawiera znaki sterujące albo niepoprawny tekst",
+    "field {field} must be true or false": "pole {field} musi mieć wartość true albo false",
     'field on must be true/false or "on"/"off"': 'pole on musi być true/false albo "on"/"off"',
     "line too long (max {limit} bytes)": "za długa linia (maks. {limit} bajtów)",
     "invalid encoding (UTF-8 expected)": "niepoprawne kodowanie (oczekiwane UTF-8)",
@@ -225,6 +231,7 @@ PL: dict[str, str] = {
         "Działająca instancja zamknęła połączenie bez odpowiedzi.",
     "Reply too long.": "Za długa odpowiedź.",
     "Invalid reply from the running instance.": "Niepoprawna odpowiedź działającej instancji.",
+    "The request contains text that is not valid UTF-8.": "Polecenie zawiera tekst, który nie jest poprawnym UTF-8.",
 
     # ---- PipeWire tools
     "Program {program} not found — are the PipeWire tools (pipewire-utils) installed?":
@@ -256,6 +263,8 @@ PL: dict[str, str] = {
         "stan DZIAŁAJĄCEJ instancji (ikona albo --watch): tryb, stream, aplikacje",
     "in the running instance: add/remove an app's audio to/from the stream (like the OpenDeck key)":
         "w działającej instancji: dodaj/zabierz dźwięk aplikacji ze streamu (jak przycisk w OpenDeck)",
+    "with --toggle: select the app even if it is not playing right now":
+        "z --toggle: zaznacz aplikację, nawet jeśli teraz nie gra",
     "in the running instance: “Whole system” (restore Discord's normal behaviour)":
         "w działającej instancji: „Cały system” (przywróć zwykłe zachowanie Discorda)",
     "one-shot: only these apps go to the stream audio (names as in --list)":
@@ -311,6 +320,9 @@ PL: dict[str, str] = {
     "(no app is playing right now)": "(żadna aplikacja teraz nie gra)",
     "not playing now": "teraz nie gra",
     "on stream": "na streamie",
+    "Apps playing right now: {apps}": "Aplikacje, które teraz grają: {apps}",
+    "To select it anyway (e.g. before the game starts): warpipe --toggle {app} --force":
+        "Żeby mimo to ją zaznaczyć (np. przed uruchomieniem gry): warpipe --toggle {app} --force",
     "{error} Start it with: warpipe (tray icon) or warpipe --watch.":
         "{error} Uruchom go: warpipe (ikona) albo warpipe --watch.",
     "unknown error": "nieznany błąd",
@@ -323,6 +335,8 @@ PL: dict[str, str] = {
     "--json only works with --list or --status": "--json działa tylko z --list albo --status",
     "--dry-run works with --apply or --restore": "--dry-run działa z --apply albo --restore",
     "--toggle needs an app name (as shown by --list)": "--toggle wymaga nazwy aplikacji (jak w --list)",
+    "--toggle: the app name is not valid UTF-8 text": "--toggle: nazwa aplikacji nie jest poprawnym tekstem UTF-8",
+    "--force only works with --toggle": "--force działa tylko z --toggle",
     "Warning: {error} — using default settings.": "Uwaga: {error} — używam ustawień domyślnych.",
     "tray icon or --watch": "ikona albo --watch",
     "Another instance is already running ({who}). Quit it or use its menu.":

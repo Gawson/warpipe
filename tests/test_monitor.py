@@ -2,14 +2,19 @@
 
 import json
 import os
+import random
+import subprocess
+import sys
 import threading
 import time
 import unittest
+from unittest import mock
 
-from helpers import load_fixture
+from helpers import ROOT, load_fixture
 
-from warpipe.enforcer import MonitorParser, Watcher
-from warpipe.pw import PwError
+from warpipe import pw as pwmod
+from warpipe.enforcer import MonitorParser, Watcher, _terminate
+from warpipe.pw import PwCli, PwError
 
 
 def arr(objs):
@@ -204,6 +209,87 @@ class TestWatcher(unittest.TestCase):
             w.stop()
             t.join(3)
         self.assertFalse(t.is_alive())
+
+
+# A stand-in for the tool: starts the monitor (with `sleep <marker>` instead of
+# pw-dump), prints its PID and waits to be killed.
+_TOOL = r"""
+import sys, threading, time
+sys.path.insert(0, sys.argv[1])
+from warpipe import pw
+pw.MONITOR_ARGV[:] = ["sleep", sys.argv[2]]
+
+def start():
+    p = pw.PwCli().start_monitor()
+    print(p.pid, flush=True)
+    time.sleep(3600)          # like the Watcher thread: lives as long as the tool
+
+if sys.argv[3] == "thread":
+    threading.Thread(target=start, daemon=True).start()
+    time.sleep(3600)
+else:
+    start()
+"""
+
+
+def _alive(pid: int, marker: str) -> bool:
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            cmd = f.read()
+        with open(f"/proc/{pid}/stat") as f:
+            state = f.read().rsplit(")", 1)[1].split()[0]
+    except OSError:
+        return False
+    return marker.encode() in cmd and state != "Z"
+
+
+@unittest.skipUnless(os.path.isdir("/proc/self") and pwmod._prctl is not None, "Linux prctl needed")
+class TestMonitorDiesWithTool(unittest.TestCase):
+    """Review finding: after SIGKILL of the tool its `pw-dump -m -N` kept running
+    (re-parented to systemd --user). PR_SET_PDEATHSIG makes it go with the tool."""
+
+    def _run(self, mode: str) -> None:
+        marker = f"{3600 + random.randint(1, 999)}.{os.getpid()}"
+        tool = subprocess.Popen([sys.executable, "-c", _TOOL, ROOT, marker, mode],
+                                stdout=subprocess.PIPE, stdin=subprocess.DEVNULL)
+        mon = None
+        try:
+            line = tool.stdout.readline()
+            mon = int(line)
+            self.assertTrue(_alive(mon, marker))
+            tool.kill()                                  # SIGKILL: no cleanup code runs
+            tool.wait(5)
+            end = time.monotonic() + 5
+            while _alive(mon, marker) and time.monotonic() < end:
+                time.sleep(0.05)
+            self.assertFalse(_alive(mon, marker), "the monitor outlived the killed tool")
+        finally:
+            if tool.poll() is None:
+                tool.kill()
+                tool.wait(5)
+            tool.stdout.close()
+            if mon is not None and _alive(mon, marker):
+                os.kill(mon, 9)
+
+    def test_sigkill_of_tool_main_thread(self):     # --watch: the Watcher runs in the main thread
+        self._run("main")
+
+    def test_sigkill_of_tool_watcher_thread(self):  # tray: the Watcher has its own thread
+        self._run("thread")
+
+    def test_normal_stop_still_works(self):
+        marker = f"{3600 + random.randint(1, 999)}.{os.getpid()}"
+        with mock.patch.object(pwmod, "MONITOR_ARGV", ["sleep", marker]):
+            p = PwCli().start_monitor()
+        try:
+            self.assertTrue(_alive(p.pid, marker))
+            _terminate(p)
+            self.assertIsNotNone(p.returncode)
+            self.assertFalse(_alive(p.pid, marker))
+        finally:
+            if p.poll() is None:
+                p.kill()
+                p.wait(5)
 
 
 if __name__ == "__main__":

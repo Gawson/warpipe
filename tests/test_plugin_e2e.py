@@ -297,6 +297,92 @@ class TestLaunchTool(PluginBase):
         self.od.wait_image(wf, "app:down")
 
 
+class TestKeyPressedWhileToolDown(PluginBase):
+    """Review findings: a key pressed while the tool is down must keep its meaning
+    ("Whole system" must not end up applying the saved selection), and a tool that
+    exits right away must be reported at once instead of "starting…" for 20 s."""
+
+    def make_launcher(self, body):
+        path = os.path.join(self.tmp, "launcher")
+        with open(path, "w") as f:
+            f.write("#!/bin/sh\n" + body)
+        os.chmod(path, 0o755)
+        return path
+
+    def setup_keys(self, launcher):
+        self.launch()
+        wf, ff, sysk = context_for(0), context_for(1), context_for(2)
+        self.od.will_appear(wf, ACTION_APP, WF)
+        self.od.will_appear(ff, ACTION_APP, FF)
+        self.od.will_appear(sysk, ACTION_SYSTEM, {})
+        self.od.wait_image(sysk, "system:down")
+        self.od.did_receive_global_settings({"toolPath": launcher})
+        time.sleep(0.3)
+        return wf, ff, sysk
+
+    # the tool starts with its SAVED selection: only Warframe
+    SAVED = make_status(True, "active", [("Warframe.x64.exe", True, True, True), ("Firefox", True, False, False)])
+
+    def test_whole_system_pressed_while_down(self):
+        marker = os.path.join(self.tmp, "launched")
+        wf, ff, sysk = self.setup_keys(self.make_launcher(f'echo "$*" >> "{marker}"\n'))
+        self.od.key_down(sysk, ACTION_SYSTEM, {})
+        self.od.wait_image(sysk, "system:starting")
+        ctl = self.start_tool(self.SAVED)
+        cmd = ctl.wait_command(lambda c: c.get("cmd") == "system")
+        self.assertTrue(str(cmd["id"]).startswith("p"))
+        time.sleep(0.3)
+        self.assertEqual([c["cmd"] for c in ctl.commands], ["subscribe", "system"])
+        with open(marker) as f:
+            self.assertEqual(f.read().split(), ["--tray"])    # started once
+
+    def test_app_key_pressed_while_down_last_press_wins(self):
+        wf, ff, sysk = self.setup_keys(self.make_launcher("exit 0\n"))
+        self.od.key_down(sysk, ACTION_SYSTEM, {})
+        self.od.wait_image(ff, "app:starting")
+        m0 = self.od.mark()
+        self.od.key_down(ff, ACTION_APP, FF)         # pressed while starting: replaces "system"
+        log = self.od.wait_for(lambda m: m.get("event") == "logMessage" and "starting" in m["payload"]["message"]
+                               and "applied" in m["payload"]["message"], since=m0)
+        self.assertIn("Warpipe is starting", log["payload"]["message"])
+        ctl = self.start_tool(self.SAVED)
+        cmd = ctl.wait_command(lambda c: c.get("cmd") == "set")
+        self.assertEqual({k: cmd[k] for k in ("app", "on", "require_present")},
+                         {"app": "Firefox", "on": True, "require_present": True})
+        time.sleep(0.3)
+        self.assertEqual([c["cmd"] for c in ctl.commands], ["subscribe", "set"])
+        # the tool refusing it (e.g. the app is not playing) -> alert on that key
+        ctl.reply_ok = False
+        m1 = self.od.mark()
+        self.od.key_down(ff, ACTION_APP, FF)
+        self.od.wait_for(lambda m: m.get("event") == "showAlert" and m.get("context") == ff, since=m1)
+
+    def test_tool_exits_right_away(self):
+        counter = os.path.join(self.tmp, "starts")
+        wf, ff, sysk = self.setup_keys(self.make_launcher(f'echo x >> "{counter}"\nexit 3\n'))
+        m0 = self.od.mark()
+        t0 = time.monotonic()
+        self.od.key_down(wf, ACTION_APP, WF)
+        self.od.wait_for(lambda m: m.get("event") == "showAlert" and m.get("context") == wf, 5, since=m0)
+        log = self.od.wait_for(lambda m: m.get("event") == "logMessage" and "exit code 3" in m["payload"]["message"],
+                               5, since=m0)
+        self.assertIn("exited right away", log["payload"]["message"])
+        self.od.wait_image(wf, "app:down", timeout=5)
+        self.od.wait_image(sysk, "system:down", timeout=5)
+        self.assertLess(time.monotonic() - t0, 10)   # not STARTING_S (20 s)
+        self.assertEqual([i["state"] for i in self.od.images(wf, since=m0)], ["app:starting", "app:down"])
+        # the next press is not ignored: it tries again right away
+        self.od.key_down(wf, ACTION_APP, WF)
+        end = time.monotonic() + 5
+        while time.monotonic() < end:
+            with open(counter) as f:
+                if len(f.read().split()) >= 2:
+                    break
+            time.sleep(0.05)
+        with open(counter) as f:
+            self.assertEqual(len(f.read().split()), 2)
+
+
 class TestPropertyInspectorScript(unittest.TestCase):
     """pi/app.js in node (if available): syntax + pure functions (list, status line)."""
 

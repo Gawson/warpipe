@@ -7,7 +7,22 @@ and receives events (willAppear, keyDown, sendToPlugin, ...).
 
 It talks to the tool (tray icon or --watch) over
 $XDG_RUNTIME_DIR/warpipe/control.sock: subscribes to the state and only sends
-"toggle <app>" or "system". The plugin never changes PipeWire links itself.
+"toggle <app>", "set <app> on" or "system". The plugin never changes PipeWire
+links itself.
+
+A key pressed while the tool is NOT running (red "start" key):
+  - starts it (`warpipe --tray`) and remembers what the key means; as soon as the
+    started tool's socket answers, that command is sent:
+      "Whole system" -> "system" (the tool may apply its saved selection for a
+                        moment first; then everything goes to Discord again),
+      an app key     -> "set <app> on" with require_present: the app ends up on the
+                        stream (never taken off), refused with an alert if the app
+                        is not playing;
+  - presses while it is starting replace that command (the last press wins);
+  - if the started program exits with an error before its socket is up (e.g. exit
+    code 4: an older copy already holds the lock), the pressed key gets an alert,
+    the exit code goes to the OpenDeck log and the keys go back to "start" at once;
+  - if the tool is not up within STARTING_S, the remembered press is dropped.
 
 When OpenDeck closes the connection, the plugin exits.
 """
@@ -33,7 +48,8 @@ from . import __version__
 from .logic import (ACTION_APP, ACTION_SYSTEM, apps_for_pi, child_env,
                     control_socket_path, normalize_status, press_for,
                     resolve_language, resolve_tool, sanitize_global_settings,
-                    sanitize_settings, set_language, tr, visual_for)
+                    sanitize_settings, set_language, then_command, tr,
+                    visual_for)
 from .render import Renderer
 
 log = logging.getLogger("warpipe_plugin")
@@ -139,6 +155,10 @@ class ControlClient(QObject):
 
 
 class Plugin(QObject):
+    # (pid, exit code) of a tool process we started — emitted from the reaper thread,
+    # delivered in the GUI thread (queued connection)
+    tool_exited = Signal(int, int)
+
     def __init__(self, port: int, uuid: str, register_event: str = "registerPlugin",
                  env: dict | None = None, quit_cb=None) -> None:
         super().__init__()
@@ -158,6 +178,11 @@ class Plugin(QObject):
         self.ctl_known = False
         self.starting_until = 0.0
         self._last_launch = -1e9
+        self._launch_pid: int | None = None
+        self._launch_ctx = ""
+        # (context, command) of a key pressed while the tool was down; sent with the
+        # first state from the started tool (see the module docstring)
+        self._intent: tuple[str, dict] | None = None
         self._pending: dict[str, str] = {}
         self._next_id = 1
         self._ws_was_connected = False
@@ -181,6 +206,7 @@ class Plugin(QObject):
         self._known_timer = QTimer(self)
         self._known_timer.setSingleShot(True)
         self._known_timer.timeout.connect(self._mark_known)
+        self.tool_exited.connect(self._on_tool_exited)
 
     # ------------------------------------------------------------- start
     def start(self) -> None:
@@ -242,6 +268,12 @@ class Plugin(QObject):
         self.refresh_all()
         for ctx in list(self.pi_visible):
             self.push_pi(ctx)
+        if st is not None and self._intent is not None:
+            # the tool we started is up: now do what the pressed key asked for
+            ctx, cmd = self._intent
+            self._intent = None
+            log.info("Warpipe is up — sending the pressed key's command (%s)", cmd.get("cmd"))
+            self._command(cmd, ctx)
 
     def _on_reply(self, msg: dict) -> None:
         rid = msg.get("id")
@@ -268,9 +300,47 @@ class Plugin(QObject):
 
     def _starting_over(self) -> None:
         self.ctl.retry_ms = RETRY_MS
+        if self._intent is not None and not self.tool_running:
+            ctx, _cmd = self._intent
+            self._intent = None
+            self.show_alert(ctx)
+            self.log_message(tr("Warpipe did not start in time — the key press was not applied."))
         self.refresh_all()
 
-    def launch_tool(self, ctx: str) -> None:
+    def _reap(self, proc: subprocess.Popen) -> None:
+        """Reaper thread: no zombie, and the exit code goes back to the GUI thread."""
+        rc = proc.wait()
+        try:
+            self.tool_exited.emit(proc.pid, rc)
+        except RuntimeError:  # pragma: no cover - the plugin is already shutting down
+            pass
+
+    def _on_tool_exited(self, pid: int, rc: int) -> None:
+        if pid != self._launch_pid:
+            return
+        self._launch_pid = None
+        if self.tool_running:
+            log.info("the Warpipe process we started exited (code %s)", rc)
+            return
+        if rc == 0:
+            # e.g. a wrapper script that started the tool in the background — keep waiting
+            log.info("the launched program exited (code 0) — still waiting for Warpipe's control socket")
+            return
+        # It never came up: say so now, instead of showing "starting…" for STARTING_S.
+        ctx = self._intent[0] if self._intent is not None else self._launch_ctx
+        self._intent = None
+        self.starting_until = 0.0
+        self._starting_timer.stop()
+        self.ctl.retry_ms = RETRY_MS
+        self._last_launch = -1e9          # the next press may try again right away
+        if ctx:
+            self.show_alert(ctx)
+        self.log_message(tr("Warpipe exited right away (exit code {code}) — maybe an older copy is already "
+                            "running, or the program path is wrong.").format(code=rc))
+        self.refresh_all()
+
+    def launch_tool(self, ctx: str, cmd: dict | None = None) -> None:
+        """Start the tool; `cmd` is sent once its control socket answers."""
         argv, problem = resolve_tool(self.global_settings, self.env)
         if argv is None:
             self.show_alert(ctx)
@@ -278,6 +348,7 @@ class Plugin(QObject):
             return
         now = time.monotonic()
         if now - self._last_launch < LAUNCH_COOLDOWN_S:
+            log.info("key press ignored: Warpipe was started less than %.0f s ago", LAUNCH_COOLDOWN_S)
             return
         self._last_launch = now
         try:
@@ -289,8 +360,11 @@ class Plugin(QObject):
             self.show_alert(ctx)
             self.log_message(tr("failed to start {program}: {error}").format(program=argv[0], error=e))
             return
+        self._launch_pid = proc.pid
+        self._launch_ctx = ctx
+        self._intent = (ctx, cmd) if cmd else None
         # reap the exit status in the background (no zombie); the process runs in its own session
-        threading.Thread(target=proc.wait, name="warpipe_plugin-reaper", daemon=True).start()
+        threading.Thread(target=self._reap, args=(proc,), name="warpipe_plugin-reaper", daemon=True).start()
         self.log_message(tr("starting Warpipe: {program} --tray").format(program=argv[0]))
         self.starting_until = now + STARTING_S
         self._starting_timer.start(int(STARTING_S * 1000) + 50)
@@ -383,7 +457,10 @@ class Plugin(QObject):
             return
         p = press_for(c["action"], c["settings"], self.status, self.tool_running, self.starting)
         if p.kind == "launch":
-            self.launch_tool(ctx)
+            self.launch_tool(ctx, then_command(p))
+        elif p.kind == "pending":
+            self._intent = (ctx, then_command(p))
+            self.log_message(tr("Warpipe is starting — this press will be applied when it is ready."))
         elif p.kind == "toggle":
             self._command({"cmd": "toggle", "app": p.app}, ctx)
         elif p.kind == "system":

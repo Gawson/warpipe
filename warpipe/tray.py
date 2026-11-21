@@ -39,7 +39,7 @@ from PySide6.QtWidgets import (QApplication, QMenu, QMessageBox, QStyle,
 
 from . import APP_ID, APP_NAME, DESKTOP_ID
 from .control import start_control_server
-from .enforcer import Enforcer, Status, Watcher
+from .enforcer import Enforcer, InvalidAppName, Status, Watcher
 from .i18n import _, ngettext
 from .planner import KIND_MIC, STATUS_AMBIGUOUS
 from .state import Config, InstanceLock, SnapshotStore
@@ -334,7 +334,10 @@ class TrayController(QObject):
         self.enforcer.set_enabled(False)
 
     def _on_app(self, key: str, checked: bool) -> None:
-        self.enforcer.set_app_selected(key, bool(checked))
+        try:
+            self.enforcer.set_app_selected(key, bool(checked))
+        except InvalidAppName as e:   # a name from the graph that can't be saved
+            self._on_event("error", str(e))
 
     def _on_pick_capture(self, serials) -> None:
         self.enforcer.set_capture_override(serials)

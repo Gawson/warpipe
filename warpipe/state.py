@@ -59,6 +59,20 @@ def _atomic_write_json(path: Path, data: dict) -> None:
         raise
 
 
+def is_utf8_text(value) -> bool:
+    """A str that can be written as UTF-8 (no lone surrogates, e.g. "\\ud800").
+
+    JSON allows such escapes, but a name containing one can't be saved, sent
+    over the control socket or printed — it is treated as invalid everywhere."""
+    if not isinstance(value, str):
+        return False
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 def _str_list(value, default: Iterable[str]) -> tuple[str, ...]:
     if isinstance(value, list) and all(isinstance(x, str) for x in value):
         return tuple(x for x in value if x.strip())
@@ -99,14 +113,15 @@ class Config:
     def selected_apps(self) -> list[str]:
         v = self.raw.get("selected_apps")
         if isinstance(v, list):
-            return [x for x in v if isinstance(x, str) and x]
+            # a hand-edited "\ud800" would make every later save fail — skip it
+            return [x for x in v if isinstance(x, str) and x and is_utf8_text(x)]
         return []
 
     @selected_apps.setter
     def selected_apps(self, keys: Iterable[str]) -> None:
         seen = {}
         for k in keys:
-            if k and k.casefold() not in seen:
+            if k and is_utf8_text(k) and k.casefold() not in seen:
                 seen[k.casefold()] = k
         self.raw["selected_apps"] = sorted(seen.values(), key=str.casefold)
 

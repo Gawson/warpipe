@@ -12,12 +12,56 @@ we created them.
 
 from __future__ import annotations
 
+import ctypes
 import json
+import os
+import signal
 import subprocess
 from typing import Any
 
 from .graph import MANAGED_KEY, RESTORED_KEY
 from .i18n import _
+
+MONITOR_ARGV = ["pw-dump", "-m", "-N"]
+PR_SET_PDEATHSIG = 1
+
+
+def _load_prctl():
+    """libc prctl(), resolved once in the parent (dlopen/dlsym are not safe in a
+    forked child of a multi-threaded process). None if unavailable."""
+    try:
+        fn = ctypes.CDLL(None, use_errno=True).prctl
+    except (OSError, AttributeError):
+        return None
+    fn.restype = ctypes.c_int
+    fn.argtypes = [ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong]
+    return fn
+
+
+_prctl = _load_prctl()
+
+
+def die_with_parent_preexec():
+    """preexec_fn for a helper child: it gets SIGTERM when the thread that started
+    it dies — also after SIGKILL or a crash of the tool, when our own cleanup never
+    runs. Without it `pw-dump -m -N` would outlive us (re-parented to systemd --user).
+
+    PR_SET_PDEATHSIG fires when the *thread* that forked the child ends; the
+    Watcher thread owns the monitor for its whole life and stops it itself, so
+    that is the same moment. Returns None (no preexec_fn) where prctl is missing."""
+    if _prctl is None:
+        return None
+    prctl = _prctl
+    parent = os.getpid()
+    sig = int(signal.SIGTERM)
+
+    def preexec() -> None:
+        # Only async-signal-safe-ish work here: one pre-resolved libc call.
+        prctl(PR_SET_PDEATHSIG, sig, 0, 0, 0)
+        if os.getppid() != parent:   # the parent died before prctl took effect
+            os.kill(os.getpid(), sig)
+
+    return preexec
 
 
 class PwError(Exception):
@@ -94,12 +138,15 @@ class PwCli:
 
     # ---------------------------------------------------------------- monitor
     def start_monitor(self) -> Any:
-        """Start `pw-dump -m -N` (a JSON stream of graph changes)."""
+        """Start `pw-dump -m -N` (a JSON stream of graph changes).
+
+        The monitor dies with the thread that started it (die_with_parent_preexec),
+        so a SIGKILLed tool does not leave it running."""
         try:
             return subprocess.Popen(
-                ["pw-dump", "-m", "-N"],
+                list(MONITOR_ARGV),
                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
-                bufsize=0,
+                bufsize=0, preexec_fn=die_with_parent_preexec(),
             )
-        except (FileNotFoundError, OSError) as e:
+        except (FileNotFoundError, OSError, subprocess.SubprocessError) as e:
             raise PwError(_("Can't run pw-dump -m: {error}").format(error=e)) from e

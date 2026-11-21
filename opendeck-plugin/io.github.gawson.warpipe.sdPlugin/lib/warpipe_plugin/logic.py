@@ -107,6 +107,14 @@ PL = {
     "not connected to Warpipe": "brak połączenia z programem Warpipe",
     "failed to start {program}: {error}": "nie udało się uruchomić {program}: {error}",
     "starting Warpipe: {program} --tray": "uruchamiam Warpipe: {program} --tray",
+    "Warpipe is starting — this press will be applied when it is ready.":
+        "Warpipe się uruchamia — to naciśnięcie zostanie wykonane, gdy będzie gotowy.",
+    "Warpipe exited right away (exit code {code}) — maybe an older copy is already running, "
+    "or the program path is wrong.":
+        "Warpipe zakończył się od razu (kod {code}) — może działa już starsza wersja "
+        "albo ścieżka do programu jest zła.",
+    "Warpipe did not start in time — the key press was not applied.":
+        "Warpipe nie uruchomił się na czas — naciśnięcie nie zostało wykonane.",
 }
 
 _language = DEFAULT_LANGUAGE
@@ -340,22 +348,47 @@ def visual_for(action: str, settings: dict, status: dict | None, tool_running: b
 
 @dataclass(frozen=True)
 class Press:
-    kind: str          # "launch" | "toggle" | "system" | "alert" | "none"
+    # "launch"  — the tool is not running: start it, then send then_command();
+    # "pending" — the tool is being started: replace the command to send (last press wins);
+    # "toggle" | "system" | "alert" | "none"
+    kind: str
     app: str = ""
     reason: str = ""
+    then: str = ""     # with launch/pending: THEN_SYSTEM or THEN_APP_ON
+
+
+# What a key pressed while the tool is down means once the tool is up. The key's
+# intent must not be lost: without this the freshly started tool would just apply
+# its saved selection — even when "Whole system" was pressed.
+THEN_SYSTEM = "system"
+THEN_APP_ON = "app_on"
+
+
+def then_command(press: Press) -> dict | None:
+    """The control command for a launch/pending press (None if there is nothing to send).
+
+    "Whole system" -> {"cmd": "system"}. An app key -> "set on" with require_present:
+    the app ends up on the stream (no change if it already is — unlike a toggle, a
+    press never takes it off), and the tool refuses it if the app is not playing,
+    so a key for a game that isn't running can't silence the stream."""
+    if press.then == THEN_SYSTEM:
+        return {"cmd": "system"}
+    if press.then == THEN_APP_ON and press.app:
+        return {"cmd": "set", "app": press.app, "on": True, "require_present": True}
+    return None
 
 
 def press_for(action: str, settings: dict, status: dict | None, tool_running: bool,
               starting: bool = False) -> Press:
     if action == ACTION_SYSTEM:
         if not tool_running or status is None:
-            return Press("none") if starting else Press("launch")
+            return Press("pending" if starting else "launch", then=THEN_SYSTEM)
         return Press("system")
     key = settings.get("app", "")
     if not key:
         return Press("alert", reason=tr("This key has no app selected — pick one in the key settings."))
     if not tool_running or status is None:
-        return Press("none") if starting else Press("launch")
+        return Press("pending" if starting else "launch", app=key, then=THEN_APP_ON)
     a = find_app(status, key)
     if (a is None or not a.get("present")) and not is_effective(status, key):
         return Press("alert", reason=tr("App {app} is not playing right now — nothing to toggle.").format(app=key))

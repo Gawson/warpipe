@@ -6,6 +6,7 @@ import argparse
 import json
 import logging
 import os
+import shlex
 import signal
 import sys
 
@@ -21,7 +22,7 @@ from .planner import (STATUS_UNKNOWN_LABEL, Detection, app_key, detect,
                       status_label)
 from .pw import PwCli, PwError
 from .scrub import scrub_dump
-from .state import Config, InstanceLock, SnapshotStore
+from .state import Config, InstanceLock, SnapshotStore, is_utf8_text
 
 EXIT_OK = 0
 EXIT_ERROR = 1
@@ -59,6 +60,8 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--toggle", metavar="APP",
                     help=_("in the running instance: add/remove an app's audio to/from the stream "
                            "(like the OpenDeck key)"))
+    ap.add_argument("--force", action="store_true",
+                    help=_("with --toggle: select the app even if it is not playing right now"))
     ap.add_argument("--system", action="store_true",
                     help=_("in the running instance: “Whole system” (restore Discord's normal behaviour)"))
     ap.add_argument("--apply", nargs="+", metavar="APP",
@@ -368,13 +371,29 @@ def _print_status(status: dict) -> None:
         print(f"  {box} {a.get('display') or a.get('key')}" + (f"  — {', '.join(extra)}" if extra else ""))
 
 
+def _print_not_playing(reply: dict, app: str) -> None:
+    """--toggle refused (like --apply with a typo): the error, the apps playing now, a hint."""
+    print(_("Error: {error}").format(error=reply.get("error") or _("unknown error")), file=sys.stderr)
+    status = reply.get("status") if isinstance(reply.get("status"), dict) else {}
+    playing = [a.get("key") for a in status.get("apps") or []
+               if isinstance(a, dict) and a.get("present") and isinstance(a.get("key"), str)]
+    if playing:
+        print(_("Apps playing right now: {apps}").format(apps=", ".join(playing)), file=sys.stderr)
+    else:
+        print(_("No app is playing right now."), file=sys.stderr)
+    print(_("To select it anyway (e.g. before the game starts): warpipe --toggle {app} --force")
+          .format(app=shlex.quote(app)), file=sys.stderr)
+
+
 def cmd_remote(args) -> int:
     if args.status:
         req = {"cmd": "status"}
     elif args.system:
         req = {"cmd": "system"}
     else:
-        req = {"cmd": "toggle", "app": args.toggle}
+        # Without --force, turning on an app that is not playing is refused by the
+        # running instance: in "Whole system" a typo would silence the whole stream.
+        req = {"cmd": "toggle", "app": args.toggle, "require_present": not args.force}
     try:
         reply = control_request(req)
     except NotRunning as e:
@@ -383,6 +402,9 @@ def cmd_remote(args) -> int:
     except ControlError as e:
         print(_("Error: {error}").format(error=e), file=sys.stderr)
         return EXIT_ERROR
+    if not reply.get("ok") and reply.get("code") == "not_playing":
+        _print_not_playing(reply, args.toggle or "")
+        return EXIT_USAGE
     if not reply.get("ok"):
         print(_("Error: {error}").format(error=reply.get("error") or _("unknown error")), file=sys.stderr)
         if args.json and isinstance(reply.get("status"), dict):
@@ -424,11 +446,16 @@ def main(argv: list[str] | None = None) -> int:
                    "--toggle, --system (exception: --watch --apply)"))
     if args.json and not (args.list or args.status):
         ap.error(_("--json only works with --list or --status"))
+    if args.force and args.toggle is None:
+        ap.error(_("--force only works with --toggle"))
     if args.dry_run and not (args.apply or args.restore) or (args.dry_run and args.watch):
         ap.error(_("--dry-run works with --apply or --restore"))
     if modes and modes[0] in ("status", "toggle", "system"):
         if args.toggle is not None and not args.toggle.strip():
             ap.error(_("--toggle needs an app name (as shown by --list)"))
+        if args.toggle is not None and not is_utf8_text(args.toggle):
+            # e.g. a byte that is not UTF-8 in argv (Python keeps it as "\udcff")
+            ap.error(_("--toggle: the app name is not valid UTF-8 text"))
         # Only talks to the running instance — no lock, no PipeWire, no config.
         return cmd_remote(args)
     if not modes:

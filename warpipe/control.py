@@ -17,12 +17,18 @@ Protocol: UTF-8, one JSON message per line (max 4096 bytes).
   → {"cmd": "system"}                      ("Whole system": disable enforcement and restore)
   → {"cmd": "subscribe"}                   (then the server pushes the state after every change)
   An optional "id" (number or short string) is echoed in the reply.
+  toggle/set take an optional "require_present": true — turning on an app that is
+  not playing right now is then refused (code "not_playing") instead of, in
+  "Whole system" mode, cutting every app out of the stream.
 
   ← {"type": "reply", "id": …, "ok": true, "message": "…", "status": {…}}
-  ← {"type": "reply", "id": …, "ok": false, "error": "…"}
+  ← {"type": "reply", "id": …, "ok": false, "error": "…"[, "code": "…"][, "status": {…}]}
   ← {"type": "status", "status": {…}}      (only after subscribe)
 
   "message" and "error" are human-readable, in the instance's UI language.
+  "code" (machine-readable, optional): "not_playing", "invalid_app".
+  App names must be valid UTF-8 text without control characters (Unicode
+  categories Cc, Cs, Zl, Zp); anything else is refused and the server keeps serving.
 
 State:
   {"version": 1, "tool": "0.1.0", "enforce": bool,
@@ -51,12 +57,14 @@ import stat
 import struct
 import threading
 import time
+import unicodedata
 from pathlib import Path
 
 from . import __version__
+from .enforcer import AppNotPlaying, InvalidAppName
 from .i18n import _
 from .planner import STATUS_AMBIGUOUS, STATUS_FOUND, STATUS_INVALID
-from .state import runtime_dir
+from .state import is_utf8_text, runtime_dir
 
 log = logging.getLogger("warpipe")
 
@@ -74,6 +82,13 @@ CAPTURE_NONE = "none"
 CAPTURE_AMBIGUOUS = "ambiguous"
 
 COMMANDS = ("status", "toggle", "set", "system", "subscribe")
+
+CODE_NOT_PLAYING = "not_playing"
+CODE_INVALID_APP = "invalid_app"
+
+# Unicode categories refused in names: control characters (C0, DEL, C1), lone
+# surrogates (they can't even be encoded as UTF-8), line and paragraph separators.
+FORBIDDEN_CATEGORIES = ("Cc", "Cs", "Zl", "Zp")
 
 
 class ControlError(Exception):
@@ -151,8 +166,8 @@ def _clean_text(value, what: str, limit: int, rid=None) -> str:
     if len(v) > limit:
         raise ProtocolError(_("field {field} is too long (max {limit} characters)").format(field=what, limit=limit),
                             rid)
-    if any(ord(ch) < 32 or ord(ch) == 127 for ch in v):
-        raise ProtocolError(_("field {field} contains control characters").format(field=what), rid)
+    if not is_utf8_text(v) or any(unicodedata.category(ch) in FORBIDDEN_CATEGORIES for ch in v):
+        raise ProtocolError(_("field {field} contains control characters or invalid text").format(field=what), rid)
     return v
 
 
@@ -162,6 +177,13 @@ def _parse_on(value, rid) -> bool:
     if isinstance(value, str) and value.strip().lower() in ("on", "off"):
         return value.strip().lower() == "on"
     raise ProtocolError(_("field on must be true/false or \"on\"/\"off\""), rid)
+
+
+def _parse_flag(obj: dict, name: str, rid) -> bool:
+    value = obj.get(name, False)
+    if not isinstance(value, bool):
+        raise ProtocolError(_("field {field} must be true or false").format(field=name), rid)
+    return value
 
 
 def parse_request(line) -> dict:
@@ -194,6 +216,7 @@ def parse_request(line) -> dict:
     req = {"cmd": cmd, "id": rid}
     if cmd in ("toggle", "set"):
         req["app"] = _clean_text(obj.get("app"), "app", MAX_APP_LEN, rid)
+        req["require_present"] = _parse_flag(obj, "require_present", rid)
     if cmd == "set":
         req["on"] = _parse_on(obj.get("on"), rid)
     return req
@@ -212,7 +235,9 @@ class ControlHandler:
 
     def _reply(self, st, message: str) -> dict:
         d = status_to_dict(st)
-        out = {"type": "reply", "ok": not st.error, "message": message, "status": d}
+        out = {"type": "reply", "ok": not st.error, "status": d}
+        if message:
+            out["message"] = message
         if st.error:
             out["error"] = str(st.error)
         return out
@@ -221,20 +246,30 @@ class ControlHandler:
         cmd = req.get("cmd")
         if cmd in ("status", "subscribe"):
             return {"type": "reply", "ok": True, "status": self.status()}
-        if cmd == "toggle":
-            st, msg = self.enforcer.toggle_app(req["app"])
-            return self._reply(st, msg)
-        if cmd == "set":
-            st, msg = self.enforcer.set_app(req["app"], bool(req["on"]))
-            return self._reply(st, msg)
+        try:
+            if cmd == "toggle":
+                st, msg = self.enforcer.toggle_app(req["app"], require_present=bool(req.get("require_present")))
+                return self._reply(st, msg)
+            if cmd == "set":
+                st, msg = self.enforcer.set_app(req["app"], bool(req["on"]),
+                                                require_present=bool(req.get("require_present")))
+                return self._reply(st, msg)
+        except AppNotPlaying as e:
+            return {"type": "reply", "ok": False, "code": CODE_NOT_PLAYING, "error": str(e),
+                    "status": status_to_dict(e.status)}
+        except InvalidAppName as e:
+            return {"type": "reply", "ok": False, "code": CODE_INVALID_APP, "error": str(e)}
         if cmd == "system":
             st = self.enforcer.set_enabled(False)
-            return self._reply(st, _("All system audio goes to Discord."))
+            # on a failed restore st.error says so — no "all system audio" message then
+            return self._reply(st, "" if st.error else _("All system audio goes to Discord."))
         return {"type": "reply", "ok": False, "error": _("unknown command: {cmd}").format(cmd=repr(cmd))}
 
 
 def _dumps(obj) -> bytes:
-    return (json.dumps(obj, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
+    """One JSON line. Never raises on odd text: a lone surrogate (e.g. from a
+    hand-edited config) becomes "?", so the output is always valid UTF-8 JSON."""
+    return (json.dumps(obj, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8", "replace")
 
 
 # --------------------------------------------------------------------------
@@ -484,7 +519,12 @@ class ControlServer:
                     line, buf = buf.split(b"\n", 1)
                     line = line.rstrip(b"\r")
                     if line.strip():
-                        self._handle_line(client, line)
+                        try:
+                            self._handle_line(client, line)
+                        except Exception:
+                            # one bad request must not end this client's connection
+                            log.exception("control channel: error while handling a request")
+                            client.send({"type": "reply", "ok": False, "error": _("internal error (see the log)")})
                 if len(buf) > MAX_LINE:
                     client.send({"type": "reply", "ok": False,
                                  "error": _("line too long (max {limit} bytes) — disconnecting")
@@ -544,7 +584,11 @@ class ControlServer:
                     return
                 if not self._dirty.is_set() or time.monotonic() - start >= MAX_DEBOUNCE:
                     break
-            self._push_all()
+            try:
+                self._push_all()
+            except Exception:
+                # the notify thread must survive anything, or subscribers go silent for good
+                log.exception("control channel: pushing the state failed")
 
     def _push_all(self) -> None:
         with self._push_lock:
@@ -552,11 +596,7 @@ class ControlServer:
                 subs = [c for c in self._clients if c.subscribed]
             if not subs:
                 return
-            try:
-                status = self.handler.status()
-            except Exception:  # pragma: no cover
-                log.exception("control channel: status")
-                return
+            status = self.handler.status()
             data = _dumps(status)
             msg = _dumps({"type": "status", "status": status})
             for c in subs:
@@ -589,6 +629,11 @@ def start_control_server(enforcer, path: Path | None = None) -> ControlServer | 
 def request(req: dict, path: Path | None = None, timeout: float = 30.0) -> dict:
     """Send one command to the running instance and return the reply."""
     p = Path(path) if path is not None else socket_path()
+    try:
+        json.dumps(req, ensure_ascii=False).encode("utf-8")
+    except UnicodeEncodeError as e:
+        # e.g. an argv byte that is not UTF-8 ("\udcff"): refuse, don't send a "?"
+        raise ControlError(_("The request contains text that is not valid UTF-8.")) from e
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     s.settimeout(timeout)
     try:

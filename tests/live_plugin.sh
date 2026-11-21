@@ -97,10 +97,22 @@ cleanup() {
     else fail "sprzątanie: zostało: $left"; fi
     if pactl list short modules | grep -q "sink_name=$SINK"; then fail "sprzątanie: moduł null-sink został"
     else pass "sprzątanie: brak modułu $SINK"; fi
-    if pgrep -u "$(id -u)" -f "pw-cat.*ddp-test" >/dev/null; then fail "sprzątanie: działa jeszcze pw-cat ddp-test"
-    else pass "sprzątanie: brak procesów pw-cat ddp-test"; fi
-    if pgrep -u "$(id -u)" -f "warpipe-plugin -port" >/dev/null; then fail "sprzątanie: działa jeszcze wtyczka"
-    else pass "sprzątanie: brak procesu wtyczki"; fi
+    # Only the PIDs THIS run started (<tmp>/pids): a machine-wide pgrep would also see
+    # other instances (a parallel unit-test run, OpenDeck running the installed plugin).
+    local cats="" plugins=""
+    if [ -f "$TMP/pids" ]; then
+        while read -r pid name; do
+            case "$name" in
+                watch|relaunched-watch) ;;
+                plugin) proc_matches "$pid" "warpipe-plugin" && plugins="$plugins $pid" ;;
+                *) proc_matches "$pid" "pw-cat" && cats="$cats $pid" ;;
+            esac
+        done < "$TMP/pids"
+    fi
+    if [ -n "$cats" ]; then fail "sprzątanie: działa jeszcze pw-cat z testu:$cats"
+    else pass "sprzątanie: brak procesów pw-cat z testu"; fi
+    if [ -n "$plugins" ]; then fail "sprzątanie: działa jeszcze wtyczka z testu:$plugins"
+    else pass "sprzątanie: brak procesu wtyczki z testu"; fi
     local alive=""
     if [ -f "$TMP/pids" ]; then
         while read -r pid name; do

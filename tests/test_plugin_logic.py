@@ -109,7 +109,23 @@ class TestPress(unittest.TestCase):
     def test_launch_when_down(self):
         self.assertEqual(L.press_for(ACTION_APP, WF, None, False).kind, "launch")
         self.assertEqual(L.press_for(ACTION_SYSTEM, {}, None, False).kind, "launch")
-        self.assertEqual(L.press_for(ACTION_APP, WF, None, False, starting=True).kind, "none")
+        self.assertEqual(L.press_for(ACTION_APP, WF, None, False, starting=True).kind, "pending")
+        self.assertEqual(L.press_for(ACTION_SYSTEM, {}, None, False, starting=True).kind, "pending")
+        # a key without an app is still just an alert, tool or no tool
+        self.assertEqual(L.press_for(ACTION_APP, {"app": "", "label": ""}, None, False).kind, "alert")
+
+    def test_key_intent_kept_when_launching(self):
+        """Review finding: "Whole system" pressed while the tool is down must not end up
+        applying the saved selection — the command is sent once the tool is up."""
+        p = L.press_for(ACTION_SYSTEM, {}, None, False)
+        self.assertEqual(L.then_command(p), {"cmd": "system"})
+        self.assertEqual(L.then_command(L.press_for(ACTION_SYSTEM, {}, None, False, starting=True)),
+                         {"cmd": "system"})
+        # an app key: "on" (never takes the app off), refused by the tool if it isn't playing
+        p = L.press_for(ACTION_APP, WF, None, False)
+        self.assertEqual(L.then_command(p), {"cmd": "set", "app": "Warframe.x64.exe", "on": True,
+                                             "require_present": True})
+        self.assertIsNone(L.then_command(L.Press("toggle", app="x")))
 
     def test_toggle_present(self):
         p = L.press_for(ACTION_APP, WF, st(apps=[("Warframe.x64.exe", True, False, True)]), True)

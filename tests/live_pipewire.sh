@@ -30,6 +30,7 @@ SINK=dd-test-sink
 MOD=""
 declare -A PID_OF=()
 WATCH_PID=""
+KILL_PID=""
 PASSES=0
 FAILS=0
 WP_STATE_DIR="$HOME/.local/state/wireplumber"
@@ -189,6 +190,7 @@ cleanup() {
     trap - EXIT INT TERM
     echo "--- sprzątanie"
     if [ -n "$WATCH_PID" ]; then kill -TERM "$WATCH_PID" 2>/dev/null; sleep 1; kill_pid "$WATCH_PID"; fi
+    if [ -n "$KILL_PID" ]; then kill_pid "$KILL_PID"; fi
     for k in "${!PID_OF[@]}"; do kill_pid "${PID_OF[$k]}"; done
     wait 2>/dev/null
     if [ -n "$MOD" ]; then pactl unload-module "$MOD" 2>/dev/null; fi
@@ -203,8 +205,14 @@ cleanup() {
     else fail "sprzątanie: zostało: $left"; fi
     if pactl list short modules | grep -q "sink_name=$SINK"; then fail "sprzątanie: moduł null-sink został"
     else pass "sprzątanie: brak modułu $SINK"; fi
-    if pgrep -u "$(id -u)" -f "pw-cat.*dd-test" >/dev/null; then fail "sprzątanie: działa jeszcze pw-cat dd-test"
-    else pass "sprzątanie: brak procesów pw-cat dd-test"; fi
+    # only the processes this run started (a machine-wide pgrep would see other runs)
+    local alive="" p
+    for k in "${!PID_OF[@]}"; do
+        p=${PID_OF[$k]}
+        [ -r "/proc/$p/cmdline" ] && tr '\0' ' ' < "/proc/$p/cmdline" | grep -q -- "pw-cat" && alive="$alive $p"
+    done
+    if [ -n "$alive" ]; then fail "sprzątanie: działa jeszcze pw-cat z testu:$alive"
+    else pass "sprzątanie: brak procesów pw-cat z testu"; fi
     if [ -f "$TMP/wp-state.sha256" ]; then
         if (cd / && sha256sum --quiet -c "$TMP/wp-state.sha256" >/dev/null 2>&1); then
             pass "stan WirePlumbera (~/.local/state/wireplumber) bez zmian"
@@ -498,6 +506,33 @@ check "W5 SIGTERM: --watch kończy się z kodem 0" test "$WRC" -eq 0
 check "W5 po wyjściu: capC <- browser (stan Discorda przywrócony)" q wait-inbound "$C" "dd-test-browser" 3
 check "W5 brak naszych połączeń" test "$(q managed)" -eq 0
 check "W5 mikrofon nietknięty" mic_untouched
+
+# ================================================================ K: SIGKILL of the tool
+echo "--- K: SIGKILL narzędzia — jego monitor pw-dump -m nie może zostać (PR_SET_PDEATHSIG)"
+python3 "$HERE/bin/warpipe" --watch > "$TMP/watch-kill.log" 2>&1 &
+KILL_PID=$!
+MON_PID=""
+for _ in $(seq 1 50); do
+    MON_PID=$(pgrep -P "$KILL_PID" -f "pw-dump -m" | head -n1)   # only OUR tool's child
+    [ -n "$MON_PID" ] && break
+    sleep 0.1
+done
+check "K1 --watch uruchomił monitor pw-dump -m" test -n "$MON_PID"
+kill -9 "$KILL_PID" 2>/dev/null
+wait "$KILL_PID" 2>/dev/null
+KILL_PID=""
+MON_GONE=1
+if [ -n "$MON_PID" ]; then
+    MON_GONE=0
+    for _ in $(seq 1 30); do
+        if ! tr '\0' ' ' < "/proc/$MON_PID/cmdline" 2>/dev/null | grep -q "pw-dump"; then MON_GONE=1; break; fi
+        sleep 0.1
+    done
+    [ "$MON_GONE" = 1 ] || kill "$MON_PID" 2>/dev/null   # never leave it behind
+fi
+check "K2 po SIGKILL narzędzia monitor pw-dump -m kończy się sam (w ciągu 3 s)" test "$MON_GONE" = 1
+"${TOOL[@]}" --restore >/dev/null 2>&1
+check "K3 brak naszych połączeń" test "$(q managed)" -eq 0
 
 # ================================================================ S: stara migawka (np. po restarcie PipeWire)
 echo "--- S: migawka z innego uruchomienia PipeWire / niezgodna z grafem"
