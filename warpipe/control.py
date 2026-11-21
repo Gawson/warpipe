@@ -33,7 +33,7 @@ Protocol: UTF-8, one JSON message per line (max 4096 bytes).
   categories Cc, Cs, Zl, Zp); anything else is refused and the server keeps serving.
 
 State:
-  {"version": 1, "tool": "0.1.0", "enforce": bool,
+  {"version": 1, "tool": "0.2.0", "enforce": bool,
    "capture": {"status": "active"|"none"|"ambiguous", "count": int},
    "apps": [{"key", "display", "present", "selected", "in_stream"}],
    "mute_discord_own_sounds": bool,         (Discord's own sounds kept off the stream)

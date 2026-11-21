@@ -15,7 +15,7 @@ Modules:
   icons    — the green pipe icon, its fallbacks, app icons for the window
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 APP_NAME = "Warpipe"
 APP_ID = "warpipe"
 DESKTOP_ID = "io.github.gawson.Warpipe"  # .desktop file / icon theme name
