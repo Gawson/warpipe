@@ -32,8 +32,8 @@ from .graph import MANAGED_KEY, RESTORED_KEY, T_LINK, T_NODE, T_PORT, Graph, _as
 from .i18n import _
 from .planner import (AppEntry, Detection, DetectConfig, Op, app_key,
                       apps_in_stream, detect, link_entry, list_apps,
-                      plan_apply, plan_restore, snapshot_originals,
-                      status_label)
+                      plan_apply, plan_cut_discord_sounds, plan_restore,
+                      snapshot_originals, status_label)
 from .pw import PwError
 from .state import Config, SnapshotStore, is_utf8_text
 
@@ -72,6 +72,8 @@ class Status:
     # Keys of apps whose audio IS linked to the stream audio right now
     # (the actual graph state after a refresh, not just "selected").
     in_stream: list[str] = field(default_factory=list)
+    # Discord's own sounds (dings) are kept off the stream, also in "Whole system" mode.
+    mute_discord_own_sounds: bool = True
 
     @property
     def capture_status(self) -> str:
@@ -144,6 +146,10 @@ class Enforcer:
         self._confirmed: set[int] = set()  # serials of nodes recognized as stream audio
         self._instance: object = _UNSET    # identity of the PipeWire session (Graph.instance_id)
         self._apply_times: deque[float] = deque()
+        # (source node serial, capture serial) of Discord's own sounds cut in "Whole
+        # system" mode: only cutting the same pair AGAIN counts as a relink loop —
+        # every new ding is a new stream, a burst of them is not a loop.
+        self._sound_cuts: set[tuple[int, int]] = set()
         self._paused_until = 0.0
         self._last_error: str | None = None
         # Set when switching to "Whole system" could not restore the original links;
@@ -209,6 +215,7 @@ class Enforcer:
         if self._instance is not _UNSET and inst != self._instance:
             log.info("PipeWire restarted — forgetting old node numbers")
             self._confirmed.clear()
+            self._sound_cuts.clear()
             self._last_group = set()
             self.override = None
         self._instance = inst
@@ -263,7 +270,8 @@ class Enforcer:
                 if msg != self._last_error:
                     self._emit("error", msg)
                 self._last_error = msg
-                return self._publish(Status(None, [], self.enabled, list(self.selected), error=msg))
+                return self._publish(Status(None, [], self.enabled, list(self.selected), error=msg,
+                                            mute_discord_own_sounds=self.dcfg.mute_discord_own_sounds))
 
             self._sync_instance(graph)
             known = self._known(graph)
@@ -284,17 +292,25 @@ class Enforcer:
             appeared = bool(group_serials) and not self._last_group
 
             created: list[Op] = []
-            if self.enabled and det.found and not paused:
-                originals = snapshot_originals(graph, self.store.data)
-                plan = plan_apply(graph, det.group_nodes, self.selected, self.dcfg, originals)
+            plan = None
+            if det.found and not paused:
+                if self.enabled:
+                    originals = snapshot_originals(graph, self.store.data)
+                    plan = plan_apply(graph, det.group_nodes, self.selected, self.dcfg, originals)
+                elif self.dcfg.mute_discord_own_sounds:
+                    # "Whole system": only Discord's own sounds are cut, nothing else changes
+                    plan = plan_cut_discord_sounds(graph, det.group_nodes, self.dcfg)
+            if plan is not None:
                 for note in plan.notes:
                     log.debug("plan: %s", note)
                 retry = bool(plan.notes)
                 if plan.ops:
+                    loopish = self.enabled or self._recut(graph, plan.unlinks)
                     ok, action, created = self._execute_apply(graph, det, plan)
                     if not ok:
                         error = action
-                    self._note_apply(now)
+                    if loopish:
+                        self._note_apply(now)
                     graph = None  # stale; do not use any further
 
             # Snapshots of nodes that are gone are useless (their links are gone too).
@@ -330,7 +346,7 @@ class Enforcer:
                 detection=det, apps=apps, enabled=self.enabled, selected=list(self.selected),
                 error=error, warnings=warnings, last_action=action,
                 paused=self.clock() < self._paused_until, retry_soon=retry,
-                in_stream=in_stream,
+                in_stream=in_stream, mute_discord_own_sounds=self.dcfg.mute_discord_own_sounds,
             ))
 
     def _known(self, graph: Graph) -> set[int]:
@@ -435,18 +451,21 @@ class Enforcer:
         `objects` is the graph as the pw-dump -m stream describes it right now (the
         MonitorParser view), `new_link_ids` the links that appeared in it. A link is
         cut only if ALL of these hold:
-          - enforcement is on and not paused, and the view is the same PipeWire
+          - enforcement is on, or (in "Whole system" mode) Discord's own sounds are
+            kept off the stream; not paused; and the view is the same PipeWire
             session as the last full refresh (ids are only compared within it);
           - the link ends in the current capture group (detect() on the view, so
             a brand-new discord_capture counts too; a microphone never does);
-          - the full plan (plan_apply, the same as the refresh) removes it;
+          - the full plan (the same as the refresh: plan_apply, or in "Whole system"
+            mode plan_cut_discord_sounds) removes it;
           - it is not ours (Warpipe's markers) and does not come from a selected app.
         The snapshot is updated first, exactly like a full apply, so "Whole system"
-        brings such a link back (if its app is still playing).
+        brings such a link back (if its app is still playing; Discord's own sounds
+        only once the option is off).
         Returns the descriptions of the links removed."""
         new = {i for i in new_link_ids if isinstance(i, int)}
         with self._lock:
-            if not new or not self.enabled or self.clock() < self._paused_until:
+            if not new or not self.cuts_new_links or self.clock() < self._paused_until:
                 return []
             graph = Graph.from_dump(objects)
             if self._instance is _UNSET or graph.instance_id != self._instance:
@@ -454,9 +473,13 @@ class Enforcer:
             det = detect(graph, self.dcfg, self.override, self._known(graph))
             if not det.found:
                 return []
-            selected = {k.casefold() for k in self.selected}
-            plan = plan_apply(graph, det.group_nodes, self.selected, self.dcfg,
-                              snapshot_originals(graph, self.store.data))
+            if self.enabled:
+                selected = {k.casefold() for k in self.selected}
+                plan = plan_apply(graph, det.group_nodes, self.selected, self.dcfg,
+                                  snapshot_originals(graph, self.store.data))
+            else:
+                selected = set()
+                plan = plan_cut_discord_sounds(graph, det.group_nodes, self.dcfg)
             cuts = []
             for op in plan.unlinks:
                 link = graph.links.get(op.link_id)
@@ -492,9 +515,23 @@ class Enforcer:
                     continue
                 done.append(op.desc)
                 log.info("cut a new link to the stream right away: %s", op.desc)
-            if done:
+            if done and (self.enabled or self._recut(graph, cuts)):
                 self._note_apply(self.clock())
             return done
+
+    def _recut(self, graph: Graph, unlinks: list[Op]) -> bool:
+        """Whole-system cuts of Discord's own sounds: True if one of these links was
+        cut before (something relinks it — that is what the loop protection is for)."""
+        pairs = set()
+        for op in unlinks:
+            a, b = graph.nodes.get(op.out_node), graph.nodes.get(op.in_node)
+            if a is not None and b is not None:
+                pairs.add((a.serial, b.serial))
+        again = bool(pairs & self._sound_cuts)
+        if len(self._sound_cuts) > 4096:
+            self._sound_cuts.clear()
+        self._sound_cuts |= pairs
+        return again
 
     # ------------------------------------------------------------ restore
     def restore(self, reason: str = "") -> tuple[bool, str]:
@@ -505,40 +542,70 @@ class Enforcer:
                 return False, str(e)
             self._sync_instance(graph)   # snapshot from another PipeWire session → discarded
             self._prune_store(graph)     # snapshots of nodes that no longer exist
-            plan = plan_restore(graph, self.store.data)
+            # Discord's own sounds stay cut while the option is on (plan.kept)
+            plan = plan_restore(graph, self.store.data, self.dcfg)
             for note in plan.notes:
                 log.info("restore: %s", note)
-            errors = []
-            created = deleted = 0
-            created_ops: list[Op] = []
-            # Plan order: recreate, replace marked originals, remove ours.
-            for op in plan.ops:
-                try:
-                    if op.kind == "link":
-                        r = self.pw.link(op.out_port, op.in_port, managed=False)
-                        if r == "created":
-                            created += 1
-                            created_ops.append(op)
-                        log.info("restored: %s", op.desc)
-                    else:
-                        deleted += self.pw.unlink(op.out_port, op.in_port) == "deleted"
-                        log.info("removed ours: %s", op.desc)
-                except PwError as e:
-                    errors.append(str(e))
-            if created_ops:
-                try:
-                    self._verify_created(self._dump(), created_ops)
-                except PwError:
-                    pass
+            errors, created, deleted = self._run_restore_plan(graph, plan)
             if errors:
                 return False, errors[0]
             self.store.clear()
+            for serial, name, entry in plan.kept:
+                self.store.mark_deleted(serial, entry, name)
             try:
                 self.store.save()
             except OSError:
                 pass
             self._restore_error = None
             return True, _("restored {created}, removed {deleted}").format(created=created, deleted=deleted)
+
+    def _run_restore_plan(self, graph: Graph, plan) -> tuple[list[str], int, int]:
+        """Execute a restore plan in its order: recreate, replace marked originals,
+        remove ours. Returns (errors, created, deleted)."""
+        errors = []
+        created = deleted = 0
+        created_ops: list[Op] = []
+        for op in plan.ops:
+            try:
+                if op.kind == "link":
+                    r = self.pw.link(op.out_port, op.in_port, managed=False)
+                    if r == "created":
+                        created += 1
+                        created_ops.append(op)
+                    cap = graph.nodes.get(op.in_node)
+                    if cap is not None:
+                        self.store.mark_restored(cap.serial, op.out_serial, op.in_serial)
+                    log.info("restored: %s", op.desc)
+                else:
+                    deleted += self.pw.unlink(op.out_port, op.in_port) == "deleted"
+                    log.info("removed ours: %s", op.desc)
+            except PwError as e:
+                errors.append(str(e))
+        if created_ops:
+            try:
+                self._verify_created(self._dump(), created_ops)
+            except PwError:
+                pass
+        return errors, created, deleted
+
+    def restore_discord_sounds(self) -> tuple[bool, str]:
+        """The option was turned off in "Whole system" mode: bring back the links from
+        Discord's own sound streams that Warpipe cut (if those streams still exist)."""
+        try:
+            graph = self._dump()
+        except PwError as e:
+            return False, str(e)
+        self._sync_instance(graph)
+        self._prune_store(graph)
+        plan = plan_restore(graph, self.store.data, self.dcfg, only_discord_sounds=True)
+        errors, created, _deleted = self._run_restore_plan(graph, plan)
+        try:
+            self.store.save()
+        except OSError:
+            pass
+        if errors:
+            return False, errors[0]
+        return True, _("restored {created}, removed {deleted}").format(created=created, deleted=0)
 
     # ---------------------------------------------------------- UI/CLI actions
     def set_enabled(self, on: bool) -> Status:
@@ -683,6 +750,31 @@ class Enforcer:
             return st, _("Removed {app}. Nothing is selected, so all system audio goes to Discord.").format(app=key)
         st = self.set_app_selected(key, False)
         return st, _("Removed {app}.").format(app=key) + " " + self._routing_text()
+
+    @property
+    def cuts_new_links(self) -> bool:
+        """Does the fast path (fast_cut) have anything to do: enforcement on, or
+        Discord's own sounds kept off the stream in "Whole system" mode."""
+        return self.enabled or self.dcfg.mute_discord_own_sounds
+
+    def set_mute_discord_sounds(self, on: bool) -> Status:
+        """Keep Discord's own sounds (dings) off the stream — or let them through again.
+
+        Off in "Whole system" mode: the links Warpipe cut for this reason come back
+        right away. Off in "Only selected apps" mode: Discord's sounds become a
+        selectable app (not selected = still not on stream)."""
+        with self._lock:
+            on = bool(on)
+            self.config.mute_discord_own_sounds = on
+            self.dcfg = dataclasses.replace(self.dcfg, mute_discord_own_sounds=on)
+            self._save_config()
+            if not on and not self.enabled:
+                ok, msg = self.restore_discord_sounds()
+                if not ok:
+                    self._emit("error", _("Restore failed: {error}").format(error=msg))
+            self._emit("applied", _("Discord's own sounds: kept off the stream") if on
+                       else _("Discord's own sounds: allowed on the stream"))
+            return self.refresh("Discord sounds option")
 
     def set_language(self, value: str) -> None:
         """Save the UI language setting ("auto", "en" or "pl"); see i18n."""
@@ -932,7 +1024,10 @@ class Watcher:
         without waiting for the debounce (the full refresh still follows)."""
         links = parser.take_new_capture_links()
         fast_cut = getattr(self.enforcer, "fast_cut", None)
-        if not links or fast_cut is None or not getattr(self.enforcer, "enabled", False):
+        active = getattr(self.enforcer, "cuts_new_links", None)
+        if active is None:
+            active = getattr(self.enforcer, "enabled", False)
+        if not links or fast_cut is None or not active:
             return
         try:
             fast_cut(parser.view(), links)

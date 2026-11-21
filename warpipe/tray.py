@@ -10,14 +10,15 @@ Right click: the menu (exported over DBusMenu, shown by the panel):
   To Discord only: …                             (info)
   [x] Only selected apps
       Whole system (restore)
+  [x] Keep Discord's own sounds off the stream
   Apps playing audio:
   [x] Warframe.x64.exe
   [ ] Firefox
   (Which Discord stream? — only when detection is ambiguous)
       Quit
 
-The window's menu button: Which Discord stream? (when needed), Language, Start at
-login, Quit.
+The window's menu button: Which Discord stream? (when needed), Keep Discord's own
+sounds off the stream, Language, Start at login, Quit.
 
 Notifications: only while the window is closed, only for what needs attention and
 was not just caused by the user (errors, the loop protection, an ambiguous stream,
@@ -132,6 +133,7 @@ class TrayController(QObject):
         self.act_restore: QAction | None = None
         self.act_quit: QAction | None = None
         self.act_autostart: QAction | None = None
+        self.act_discord_sounds: QAction | None = None
         self.language_actions: dict[str, QAction] = {}
         self.build_menu(enforcer.status)
 
@@ -165,7 +167,7 @@ class TrayController(QObject):
         apps = tuple((a.key, len(a.nodes), tuple(a.hints())) for a in st.apps)
         return (st.headline(), st.routing_text(), tuple(st.warnings), st.error, st.enabled,
                 tuple(st.selected), apps, cands, st.capture_status,
-                tuple(self.enforcer.override or ()))
+                tuple(self.enforcer.override or ()), st.mute_discord_own_sounds)
 
     def build_menu(self, st: Status | None = None) -> None:
         st = st or self.enforcer.status
@@ -196,6 +198,7 @@ class TrayController(QObject):
         self.act_enforce.triggered.connect(self._on_toggle_enforce)
         self.act_restore = m.addAction(_("Whole system (restore)"))
         self.act_restore.triggered.connect(self._on_restore)
+        self.act_discord_sounds = self._add_discord_sounds_action(m, st)
         m.addSeparator()
 
         label = m.addAction(_("Apps playing audio:"))
@@ -248,11 +251,22 @@ class TrayController(QObject):
             act.setChecked(bool(self.enforcer.override) and c.serial in self.enforcer.override)
             act.triggered.connect(lambda _checked=False, s=c.serial: self._on_pick_capture([s]))
 
+    def _add_discord_sounds_action(self, m: QMenu, st: Status) -> QAction:
+        act = m.addAction(_("Keep Discord's own sounds off the stream"))
+        act.setCheckable(True)
+        act.setChecked(st.mute_discord_own_sounds)
+        act.setToolTip(_("Discord streams its own notification sounds on Linux. While Warpipe runs, "
+                         "they are cut from the stream — also in “Whole system” mode."))
+        act.triggered.connect(self._on_discord_sounds)
+        return act
+
     def build_settings_menu(self) -> None:
-        """The window's menu button: stream choice (when needed), language, start at login, quit."""
+        """The window's menu button: stream choice (when needed), Discord's own sounds,
+        language, start at login, quit."""
         m = self.settings_menu
         m.clear()
         self._add_capture_menu(m, self.enforcer.status)
+        self._add_discord_sounds_action(m, self.enforcer.status)
         lang = m.addMenu(_("Language"))
         group = QActionGroup(lang)
         current = self.enforcer.config.language
@@ -413,6 +427,9 @@ class TrayController(QObject):
             self.notify(NOTIFY_ERROR, _("Can't change start at login: {error}").format(error=e))
         if self.act_autostart is not None:
             self.act_autostart.setChecked(autostart_enabled())
+
+    def _on_discord_sounds(self, checked: bool) -> None:
+        self.enforcer.set_mute_discord_sounds(bool(checked))
 
     def _on_toggle_enforce(self, checked: bool) -> None:
         self.enforcer.set_enabled(bool(checked))

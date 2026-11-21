@@ -22,8 +22,8 @@ from typing import Iterable
 
 from . import DESKTOP_ID
 from .i18n import _
-from .planner import (DEFAULT_CAPTURE_NAMES, DEFAULT_MATCH_TERMS,
-                      DEFAULT_MIC_NAMES, DetectConfig)
+from .planner import (DEFAULT_CAPTURE_NAMES, DEFAULT_DISCORD_SOUND_NAMES,
+                      DEFAULT_MATCH_TERMS, DEFAULT_MIC_NAMES, DetectConfig)
 
 CONFIG_VERSION = 1
 
@@ -197,6 +197,16 @@ class Config:
         self.raw["language"] = value if value in ("en", "pl") else "auto"
 
     @property
+    def mute_discord_own_sounds(self) -> bool:
+        """Keep Discord's own sounds (notification dings) off the stream — default on."""
+        v = self.raw.get("mute_discord_own_sounds", True)
+        return v if isinstance(v, bool) else True
+
+    @mute_discord_own_sounds.setter
+    def mute_discord_own_sounds(self, value: bool) -> None:
+        self.raw["mute_discord_own_sounds"] = bool(value)
+
+    @property
     def confirmed_captures(self) -> list[tuple[str, str, str]]:
         """"Monitor-only" streams confirmed by the user as stream audio."""
         v = self.raw.get("confirmed_captures")
@@ -224,6 +234,8 @@ class Config:
             capture_names=_str_list(self.raw.get("capture_names"), DEFAULT_CAPTURE_NAMES),
             mic_names=_str_list(self.raw.get("mic_names"), DEFAULT_MIC_NAMES),
             confirmed=tuple(self.confirmed_captures),
+            discord_sound_names=_str_list(self.raw.get("discord_sound_names"), DEFAULT_DISCORD_SOUND_NAMES),
+            mute_discord_own_sounds=self.mute_discord_own_sounds,
         )
 
 

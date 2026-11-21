@@ -31,6 +31,20 @@ DEFAULT_CAPTURE_NAMES = ("discord_capture", "game capture")
 # Names that mean the call microphone — never pick these.
 DEFAULT_MIC_NAMES = ("WEBRTC VoiceEngine", "recStream")
 
+# Discord's own sounds (notification "dings", in-app media): played by the Discord app
+# process itself — PipeWire client application.name "discord", its own PID — not by
+# the voice engine ("WEBRTC VoiceEngine" playStream/recStream, discord_capture,
+# discord_hardware_mute, all with the voice engine's PID). Discord only skips its
+# voice engine's PID when it picks streams to capture, so on Linux it opens a
+# discord_capture for its own sound stream and streams its own dings.
+# Matched exactly (case-insensitive) against application.name, the binary's base
+# name and the Flatpak app id; configurable as "discord_sound_names".
+DEFAULT_DISCORD_SOUND_NAMES = ("discord", "discordcanary", "discordptb", "discord-canary", "discord-ptb",
+                               "com.discordapp.Discord", "com.discordapp.DiscordCanary",
+                               "com.discordapp.DiscordPTB")
+VOICE_ENGINE_MEDIA_NAMES = ("playStream", "recStream")
+VOICE_ENGINE_HELPER_NAMES = ("discord_hardware_mute",)
+
 VESKTOP_SHARE_NODE = "vencord-screen-share"
 EXCLUDED_APP_NODE_NAMES = ("vencord-sink", "vencord-screen-share")
 EXCLUDED_APP_NODE_PREFIXES = ("venmic-loopback",)
@@ -79,6 +93,9 @@ class DetectConfig:
     mic_names: tuple[str, ...] = DEFAULT_MIC_NAMES
     # "Monitor-only" streams confirmed by the user: (program, node.name, output sink).
     confirmed: tuple[tuple[str, str, str], ...] = ()
+    discord_sound_names: tuple[str, ...] = DEFAULT_DISCORD_SOUND_NAMES
+    # Keep Discord's own sounds off the stream, also in "Whole system" mode.
+    mute_discord_own_sounds: bool = True
 
 
 # --------------------------------------------------------------------------
@@ -150,6 +167,35 @@ def is_discord_own_stream(node: Node, cfg: DetectConfig) -> bool:
     banned = {n.casefold() for n in (*DEFAULT_MIC_NAMES, *DEFAULT_CAPTURE_NAMES,
                                      *cfg.mic_names, *cfg.capture_names) if n}
     return bool(own & banned)
+
+
+def is_discord_sound_stream(node: Node, cfg: DetectConfig) -> bool:
+    """Is this playback stream Discord's own sound (dings), not its voice engine?
+
+    Yes when the stream (or its client) is Discord by application.name, binary or
+    Flatpak app id (exact names from cfg.discord_sound_names) — and nothing marks it
+    as the voice engine: no voice-engine/microphone/capture name (also the names
+    from the config), no playStream/recStream, no "webrtc" in its names, not a
+    venmic/Vesktop node."""
+    if node.media_class != "Stream/Output/Audio":
+        return False
+    if node.name in EXCLUDED_APP_NODE_NAMES or node.name.startswith(EXCLUDED_APP_NODE_PREFIXES):
+        return False
+    names = {str(v).casefold() for v in (node.name, node.app_name, node.media_name,
+                                         node.client_props.get("application.name")) if v}
+    voice = {n.casefold() for n in (*DEFAULT_MIC_NAMES, *DEFAULT_CAPTURE_NAMES, *cfg.mic_names,
+                                    *cfg.capture_names, *VOICE_ENGINE_MEDIA_NAMES,
+                                    *VOICE_ENGINE_HELPER_NAMES) if n}
+    if names & voice or any("webrtc" in v for v in names):
+        return False
+    ids = set()
+    for src in (node.props, node.client_props):
+        for k in ("application.name", "application.process.binary",
+                  "pipewire.access.portal.app_id", "application.id"):
+            v = src.get(k)
+            if isinstance(v, str) and v.strip():
+                ids.add(v.strip().rsplit("/", 1)[-1].casefold())
+    return bool(ids & {n.casefold() for n in cfg.discord_sound_names if n})
 
 
 def _names_lc(node: Node) -> set[str]:
@@ -418,12 +464,14 @@ def detect(graph: Graph, cfg: DetectConfig, override_serials: Iterable[int] | No
 # --------------------------------------------------------------------------
 
 def app_streams(graph: Graph, cfg: DetectConfig) -> list[Node]:
-    """Playback streams that can be selected (without Discord and venmic nodes)."""
+    """Playback streams that can be selected (without Discord and venmic nodes).
+    Discord's own sounds are selectable like an app only while
+    cfg.mute_discord_own_sounds is off."""
     out = []
     for n in sorted(graph.nodes.values(), key=lambda n: n.serial):
         if n.media_class != "Stream/Output/Audio":
             continue
-        if is_discord_own_stream(n, cfg):
+        if is_discord_own_stream(n, cfg) and (cfg.mute_discord_own_sounds or not is_discord_sound_stream(n, cfg)):
             continue
         if n.name in EXCLUDED_APP_NODE_NAMES or n.name.startswith(EXCLUDED_APP_NODE_PREFIXES):
             continue
@@ -541,6 +589,9 @@ class Plan:
     desired: set[tuple[int, int]] = field(default_factory=set)
     routes: list[tuple[int, int]] = field(default_factory=list)  # (app node, capture node)
     notes: list[str] = field(default_factory=list)
+    # restore: snapshot entries deliberately NOT restored (Discord's own sounds while
+    # they are kept off the stream): (capture serial, capture node.name, entry)
+    kept: list[tuple[int, str, dict]] = field(default_factory=list)
 
     @property
     def links(self) -> list[Op]:
@@ -660,6 +711,23 @@ def plan_apply(graph: Graph, group: list[Node], selected_keys: Iterable[str], cf
     return plan
 
 
+def plan_cut_discord_sounds(graph: Graph, group: list[Node], cfg: DetectConfig) -> Plan:
+    """"Whole system" mode with Discord's own sounds kept off the stream: remove only
+    the links from Discord's own sound streams into the capture group. Every other
+    link stays exactly as Discord/WirePlumber made it."""
+    plan = Plan()
+    if not cfg.mute_discord_own_sounds or not group:
+        return plan
+    group_ids = {c.id for c in group}
+    for l in sorted(graph.links.values(), key=lambda l: l.id):
+        if l.in_node not in group_ids:
+            continue
+        src = graph.nodes.get(l.out_node)
+        if src is not None and is_discord_sound_stream(src, cfg):
+            plan.ops.append(_unlink_op(graph, l))
+    return plan
+
+
 # --------------------------------------------------------------------------
 # Snapshot and restore
 # --------------------------------------------------------------------------
@@ -741,15 +809,22 @@ def snapshot_originals(graph: Graph, snapshot: dict) -> set[tuple[int, int]]:
     return out
 
 
-def plan_restore(graph: Graph, snapshot: dict) -> Plan:
+def plan_restore(graph: Graph, snapshot: dict, cfg: DetectConfig | None = None, *,
+                 only_discord_sounds: bool = False) -> Plan:
     """Restore: remove our (marked) links, recreate the ones we removed.
 
     The order matters (execute in plan.ops order): first recreate missing links,
     then replace marked copies of originals with unmarked ones (unlink + link),
     finally remove the rest of our links.
+
+    With cfg.mute_discord_own_sounds, links from Discord's own sound streams are
+    NOT recreated (they are listed in plan.kept, so they can be brought back when
+    the option is turned off). only_discord_sounds: recreate just those (the
+    option was turned off in "Whole system" mode); nothing else is touched.
     """
     plan = Plan()
     restorable: set[tuple[int, int]] = set()
+    keep_cut = cfg is not None and cfg.mute_discord_own_sounds and not only_discord_sounds
     caps = snapshot.get("captures") if isinstance(snapshot, dict) else None
     if caps and snapshot.get("pw_instance") != graph.instance_id:
         plan.notes.append(_("the snapshot is from a different PipeWire session — not restoring links from it"))
@@ -758,8 +833,16 @@ def plan_restore(graph: Graph, snapshot: dict) -> Plan:
             if e.get("deleted") is not True:
                 continue
             pp = _entry_ports(graph, cap, e)
-            if pp:
-                restorable.add((pp[0].id, pp[1].id))
+            if not pp:
+                continue
+            src = graph.nodes.get(pp[0].node_id)
+            ding = cfg is not None and src is not None and is_discord_sound_stream(src, cfg)
+            if keep_cut and ding:
+                plan.kept.append((cap.serial, cap.name, e))
+                continue
+            if only_discord_sounds and not ding:
+                continue
+            restorable.add((pp[0].id, pp[1].id))
     existing = graph.link_pairs()
     replace: list[Link] = []
     for pair in sorted(restorable):
@@ -773,8 +856,9 @@ def plan_restore(graph: Graph, snapshot: dict) -> Plan:
         # (with an empty snapshot) would delete it — replace it with an unmarked one.
         plan.ops.append(_unlink_op(graph, l))
         plan.ops.append(_link_op(graph, (l.out_port, l.in_port), managed=False, original=True))
-    for l in sorted(graph.links.values(), key=lambda l: l.id):
-        if l.managed and (l.out_port, l.in_port) not in restorable:
-            plan.ops.append(_unlink_op(graph, l))
+    if not only_discord_sounds:
+        for l in sorted(graph.links.values(), key=lambda l: l.id):
+            if l.managed and (l.out_port, l.in_port) not in restorable:
+                plan.ops.append(_unlink_op(graph, l))
     plan.desired = restorable
     return plan

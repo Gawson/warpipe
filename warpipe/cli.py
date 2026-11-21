@@ -11,15 +11,15 @@ import signal
 import sys
 
 from . import APP_NAME, __version__
-from .control import ControlError, NotRunning
+from .control import ControlError, NotRunning, discord_sounds_text
 from .control import request as control_request
 from .control import start_control_server
 from .enforcer import Enforcer, Watcher, routing_text
 from .graph import Graph
 from .i18n import N_, _, ngettext
 from .planner import (STATUS_UNKNOWN_LABEL, Detection, app_key, detect,
-                      list_apps, plan_apply, plan_restore, snapshot_originals,
-                      status_label)
+                      is_discord_sound_stream, list_apps, plan_apply,
+                      plan_restore, snapshot_originals, status_label)
 from .pw import PwCli, PwError
 from .scrub import scrub_dump
 from .state import Config, InstanceLock, SnapshotStore, is_utf8_text
@@ -64,6 +64,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help=_("with --toggle: select the app even if it is not playing right now"))
     ap.add_argument("--system", action="store_true",
                     help=_("in the running instance: “Whole system” (restore Discord's normal behaviour)"))
+    ap.add_argument("--discord-sounds", choices=("on", "off"), metavar="on|off",
+                    help=_("Discord's own sounds (notification dings) on the stream: off = kept off "
+                           "(the default, also in “Whole system” mode), on = let them through; saved"))
     ap.add_argument("--apply", nargs="+", metavar="APP",
                     help=_("one-shot: only these apps go to the stream audio (names as in --list)"))
     ap.add_argument("--capture", type=int, action="append", metavar="ID",
@@ -152,6 +155,7 @@ def cmd_list(pw, config: Config, args) -> int:
         return EXIT_USAGE
     det = detect(graph, cfg, override)
     apps = list_apps(graph, cfg)
+    sounds = [n for n in sorted(graph.nodes.values(), key=lambda n: n.serial) if is_discord_sound_stream(n, cfg)]
     group_ids = {c.id for c in det.group}
     feeding = {}
     for l in graph.links.values():
@@ -172,7 +176,10 @@ def cmd_list(pw, config: Config, args) -> int:
                 "has_pid": a.has_pid,
                 "feeds_capture": sorted({cid for n in a.nodes for cid in feeding.get(n.id, ())}),
             } for a in apps],
+            "discord_sounds": [{"node_id": n.id, "feeds_capture": sorted(feeding.get(n.id, ()))}
+                               for n in sounds],
             "config": {"selected_apps": config.selected_apps, "enforce": config.enforce,
+                       "mute_discord_own_sounds": config.mute_discord_own_sounds,
                        "path": str(config.path)},
         }
         print(json.dumps(out, ensure_ascii=False, indent=2))
@@ -212,6 +219,10 @@ def cmd_list(pw, config: Config, args) -> int:
         if any(n.id in feeding for n in a.nodes):
             extra.append(_("goes to Discord"))
         print(f"  {box} {a.display}  ({ids})" + (f"  — {'; '.join(extra)}" if extra else ""))
+    print()
+    print(discord_sounds_text(config.mute_discord_own_sounds) + "  (--discord-sounds on|off)")
+    for n in sounds:
+        print(f"  #{n.id} {n.name or '?'}" + (f"  — {_('goes to Discord')}" if n.id in feeding else ""))
     print()
     print(_("Config: {path}").format(path=config.path))
     print("  " + _("selected: {apps}; enforce at start: {enforce}").format(
@@ -285,7 +296,7 @@ def cmd_restore(pw, config: Config, args) -> int:
     store = SnapshotStore()
     if args.dry_run:
         graph = Graph.from_dump(pw.dump())
-        _print_ops(plan_restore(graph, store.data))
+        _print_ops(plan_restore(graph, store.data, config.detect_config()))
         return EXIT_OK
     enf = Enforcer(pw, config, store, enabled=False, persist=False)
     ok, msg = enf.restore("--restore")
@@ -355,6 +366,8 @@ def _print_status(status: dict) -> None:
     apps = status.get("apps") or []
     chosen = [a["key"] for a in apps if a.get("selected")]
     print(routing_text(bool(status.get("enforce")), chosen))
+    if "mute_discord_own_sounds" in status:
+        print(discord_sounds_text(bool(status["mute_discord_own_sounds"])))
     if status.get("error"):
         print(_("Error: {error}").format(error=status["error"]))
     print()
@@ -421,6 +434,48 @@ def cmd_remote(args) -> int:
     return EXIT_OK
 
 
+def cmd_discord_sounds(pw, config: Config, args) -> int:
+    """--discord-sounds on|off: in the running instance (applied at once and saved there),
+    otherwise saved to the config; "on" then also brings back the links cut earlier."""
+    allow = args.discord_sounds == "on"
+    try:
+        reply = control_request({"cmd": "discord_sounds", "on": allow})
+    except NotRunning:
+        reply = None
+    except ControlError as e:
+        print(_("Error: {error}").format(error=e), file=sys.stderr)
+        return EXIT_ERROR
+    if reply is not None:
+        if not reply.get("ok"):
+            print(_("Error: {error}").format(error=reply.get("error") or _("unknown error")), file=sys.stderr)
+            return EXIT_ERROR
+        print(reply.get("message") or discord_sounds_text(not allow))
+        return EXIT_OK
+    lock = InstanceLock()
+    if not lock.acquire():           # started meanwhile — try again later rather than race it
+        print(_("Another instance is already running ({who}). Quit it or use its menu.")
+              .format(who=_("tray icon or --watch")), file=sys.stderr)
+        return EXIT_LOCKED
+    try:
+        enf = Enforcer(pw, config, SnapshotStore(), enabled=False)
+        config.mute_discord_own_sounds = not allow
+        try:
+            config.save()
+        except (OSError, ValueError) as e:
+            print(_("Can't save settings: {error}").format(error=e), file=sys.stderr)
+            return EXIT_ERROR
+        if allow:
+            enf.dcfg = config.detect_config()
+            ok, msg = enf.restore_discord_sounds()
+            if not ok:
+                print(_("Restore error: {error}").format(error=msg), file=sys.stderr)
+                return EXIT_ERROR
+    finally:
+        lock.release()
+    print(discord_sounds_text(not allow))
+    return EXIT_OK
+
+
 def cmd_dump(pw, args) -> int:
     data = scrub_dump(pw.dump())
     text = json.dumps(data, ensure_ascii=False, indent=2) + "\n"
@@ -439,11 +494,13 @@ def main(argv: list[str] | None = None) -> int:
     modes = [m for m in ("list", "restore", "watch", "dump", "tray", "status", "system") if getattr(args, m)]
     if args.toggle is not None:
         modes.append("toggle")
+    if args.discord_sounds is not None:
+        modes.append("discord_sounds")
     if args.apply and not args.watch:
         modes.append("apply")
     if len(modes) > 1:
         ap.error(_("choose one of: --list, --apply, --restore, --watch, --dump, --tray, --status, "
-                   "--toggle, --system (exception: --watch --apply)"))
+                   "--toggle, --system, --discord-sounds (exception: --watch --apply)"))
     if args.json and not (args.list or args.status):
         ap.error(_("--json only works with --list or --status"))
     if args.force and args.toggle is None:
@@ -475,6 +532,8 @@ def main(argv: list[str] | None = None) -> int:
     if mode == "tray":
         from .tray import run_tray  # PySide6 only when needed
         return run_tray(args, config, pw)
+    if mode == "discord_sounds":
+        return cmd_discord_sounds(pw, config, args)
 
     try:
         if mode == "list":

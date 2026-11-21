@@ -331,9 +331,13 @@ PL: dict[str, str] = {
     "Saved {path} (without stream titles or personal data).":
         "Zapisano {path} (bez tytułów strumieni i danych osobistych).",
     "choose one of: --list, --apply, --restore, --watch, --dump, --tray, --status, "
-    "--toggle, --system (exception: --watch --apply)":
+    "--toggle, --system, --discord-sounds (exception: --watch --apply)":
         "wybierz jedno: --list, --apply, --restore, --watch, --dump, --tray, --status, "
-        "--toggle, --system (wyjątek: --watch --apply)",
+        "--toggle, --system, --discord-sounds (wyjątek: --watch --apply)",
+    "Discord's own sounds (notification dings) on the stream: off = kept off "
+    "(the default, also in “Whole system” mode), on = let them through; saved":
+        "własne dźwięki Discorda (powiadomienia) na streamie: off = nie wpuszczaj "
+        "(domyślnie, także w trybie „Cały system”), on = wpuszczaj; zapisywane",
     "--json only works with --list or --status": "--json działa tylko z --list albo --status",
     "--dry-run works with --apply or --restore": "--dry-run działa z --apply albo --restore",
     "--toggle needs an app name (as shown by --list)": "--toggle wymaga nazwy aplikacji (jak w --list)",
@@ -381,6 +385,15 @@ PL: dict[str, str] = {
     "Back to Discord's default: all system audio goes to the stream":
         "Jak domyślnie w Discordzie: cały dźwięk systemu idzie na stream",
     "Menu": "Menu",
+
+    # ---- Discord's own sounds
+    "Keep Discord's own sounds off the stream": "Nie wpuszczaj dźwięków Discorda do streamu",
+    "Discord streams its own notification sounds on Linux. While Warpipe runs, "
+    "they are cut from the stream — also in “Whole system” mode.":
+        "Na Linuksie Discord wysyła na stream własne dźwięki powiadomień. Dopóki Warpipe działa, "
+        "są wycinane ze streamu — także w trybie „Cały system”.",
+    "Discord's own sounds: kept off the stream": "Dźwięki Discorda: poza streamem",
+    "Discord's own sounds: allowed on the stream": "Dźwięki Discorda: wpuszczane do streamu",
 }
 
 # plural msgid -> (1, 2-4, 5+) forms

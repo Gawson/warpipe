@@ -15,6 +15,8 @@ Protocol: UTF-8, one JSON message per line (max 4096 bytes).
   → {"cmd": "toggle", "app": "Warframe.x64.exe"}
   → {"cmd": "set", "app": "Warframe.x64.exe", "on": true}
   → {"cmd": "system"}                      ("Whole system": disable enforcement and restore)
+  → {"cmd": "discord_sounds", "on": false} (keep Discord's own sounds off the stream — the
+                                            default; true lets them through; saved)
   → {"cmd": "subscribe"}                   (then the server pushes the state after every change)
   An optional "id" (number or short string) is echoed in the reply.
   toggle/set take an optional "require_present": true — turning on an app that is
@@ -34,6 +36,7 @@ State:
   {"version": 1, "tool": "0.1.0", "enforce": bool,
    "capture": {"status": "active"|"none"|"ambiguous", "count": int},
    "apps": [{"key", "display", "present", "selected", "in_stream"}],
+   "mute_discord_own_sounds": bool,         (Discord's own sounds kept off the stream)
    "error": "…"}                            (error only when there is one)
 
   selected  — the app is in the saved selection (only effective with "enforce": true);
@@ -81,7 +84,7 @@ CAPTURE_ACTIVE = "active"
 CAPTURE_NONE = "none"
 CAPTURE_AMBIGUOUS = "ambiguous"
 
-COMMANDS = ("status", "toggle", "set", "system", "subscribe")
+COMMANDS = ("status", "toggle", "set", "system", "discord_sounds", "subscribe")
 
 CODE_NOT_PLAYING = "not_playing"
 CODE_INVALID_APP = "invalid_app"
@@ -124,6 +127,11 @@ def capture_state(st) -> tuple[str, int]:
     return CAPTURE_NONE, 0
 
 
+def discord_sounds_text(muted: bool) -> str:
+    return _("Discord's own sounds: kept off the stream") if muted else \
+        _("Discord's own sounds: allowed on the stream")
+
+
 def status_to_dict(st) -> dict:
     """State for channel clients. No media.name (titles) — only app keys."""
     cap, count = capture_state(st)
@@ -147,6 +155,7 @@ def status_to_dict(st) -> dict:
         "enforce": bool(st.enabled),
         "capture": {"status": cap, "count": count},
         "apps": apps,
+        "mute_discord_own_sounds": bool(getattr(st, "mute_discord_own_sounds", True)),
     }
     if st.error:
         out["error"] = str(st.error)
@@ -217,7 +226,7 @@ def parse_request(line) -> dict:
     if cmd in ("toggle", "set"):
         req["app"] = _clean_text(obj.get("app"), "app", MAX_APP_LEN, rid)
         req["require_present"] = _parse_flag(obj, "require_present", rid)
-    if cmd == "set":
+    if cmd in ("set", "discord_sounds"):
         req["on"] = _parse_on(obj.get("on"), rid)
     return req
 
@@ -259,6 +268,9 @@ class ControlHandler:
                     "status": status_to_dict(e.status)}
         except InvalidAppName as e:
             return {"type": "reply", "ok": False, "code": CODE_INVALID_APP, "error": str(e)}
+        if cmd == "discord_sounds":
+            st = self.enforcer.set_mute_discord_sounds(not req["on"])
+            return self._reply(st, discord_sounds_text(st.mute_discord_own_sounds))
         if cmd == "system":
             st = self.enforcer.set_enabled(False)
             # on a failed restore st.error says so — no "all system audio" message then

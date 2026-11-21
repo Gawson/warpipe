@@ -501,7 +501,7 @@ class TestPopupWindow(PopupCase):
         ctl = self.controller(enf)
         ctl.build_settings_menu()
         texts = [a.text() for a in ctl.settings_menu.actions() if not a.isSeparator()]
-        self.assertEqual(texts, ["Language", "Start at login", "Quit"])
+        self.assertEqual(texts, ["Keep Discord's own sounds off the stream", "Language", "Start at login", "Quit"])
         self.assertTrue(ctl.language_actions["auto"].isChecked())
         ctl.show_popup()
         ctl.language_actions["pl"].trigger()

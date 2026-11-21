@@ -14,6 +14,7 @@ from scenarios import (base_system, monitor_mode, per_app, with_apps,
 
 from warpipe.enforcer import Enforcer
 from warpipe.graph import MANAGED_KEY, T_LINK, T_PORT, Graph
+from warpipe.planner import DetectConfig
 from warpipe.state import Config, SnapshotStore
 
 
@@ -567,8 +568,26 @@ class TestFastCut(Base):
     def dumps(self):
         return sum(1 for c in self.fake.calls if c[0] == "dump")
 
-    def test_ding_cut_at_once_and_back_with_whole_system(self):
+    def test_ding_cut_at_once_and_kept_off_in_whole_system(self):
+        """Default: Discord's own sounds stay off the stream, also after "Whole system"."""
         b, ns, enf = self.setup_enforcing()
+        ding, cap, links, _new = add_ding(b)
+        self.assertEqual(len(enf.fast_cut(b.dump(), links)), 2)
+        self.assertEqual(self.inbound(b, cap), set())
+        enf.set_enabled(False)                                     # "Whole system"
+        self.assertEqual(self.inbound(b, ns.cap_ff), {ns.firefox.id})   # everything else is back
+        self.assertEqual(self.inbound(b, cap), set())              # … but not the ding
+        self.assertEqual(self.managed_count(b), 0)
+        entries = enf.store.captures[str(cap.serial)]["links"]
+        self.assertTrue(entries and all(e["deleted"] for e in entries))   # remembered for later
+        enf.set_mute_discord_sounds(False)                         # option off: the ding comes back
+        self.assertEqual(self.inbound(b, cap), {ding.id})
+        self.assertEqual(self.inbound(b, ns.cap_ff), {ns.firefox.id})
+        self.assertEqual(self.managed_count(b), 0)
+
+    def test_ding_cut_at_once_and_back_with_whole_system(self):
+        """Option off: Discord's own sounds are an app like any other."""
+        b, ns, enf = self.setup_enforcing(dcfg=DetectConfig(mute_discord_own_sounds=False))
         ding, cap, links, _new = add_ding(b)
         n = self.dumps()
         cut = enf.fast_cut(b.dump(), links)
@@ -604,10 +623,10 @@ class TestFastCut(Base):
     def test_never_when_not_enforcing_paused_or_another_session(self):
         b, ns = per_app()
         b.core(111)
-        enf = self.make(b, enabled=False, persist=False)
+        enf = self.make(b, enabled=False, persist=False, dcfg=DetectConfig(mute_discord_own_sounds=False))
         enf.refresh()
         ding, cap, links, _ = add_ding(b)
-        self.assertEqual(enf.fast_cut(b.dump(), links), [])           # "Whole system"
+        self.assertEqual(enf.fast_cut(b.dump(), links), [])           # "Whole system", dings allowed
         enf.set_enabled(True)
         ding2, cap2, links2, _ = add_ding(b)
         enf._paused_until = enf.clock() + 100                         # loop protection

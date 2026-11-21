@@ -31,6 +31,10 @@ each app's output to it. Warpipe rewires exactly those links:
   can be routed into the stream too;
 - audio is taken **before** your effects (e.g. EasyEffects), just like Discord does it;
 - the original links are snapshotted and restored on exit or with **Whole system**;
+- Discord streams its own notification sounds on Linux (they come from the Discord app itself, not
+  from its voice engine, so Discord doesn't filter them out); Warpipe keeps them off the stream by
+  default, also in **Whole system** mode — only those links are cut, nothing else changes. The menu
+  item **Keep Discord's own sounds off the stream** or `warpipe --discord-sounds on` lets them through;
 - microphones, devices, sinks and WirePlumber configuration are never touched.
 
 ## Tray
@@ -74,11 +78,12 @@ Discord's original links when it exits.
 | `warpipe --watch` | keep enforcing without a tray icon (Ctrl+C restores) |
 | `warpipe --restore` | restore the original links (whole system) |
 | `warpipe --status` / `--toggle APP` / `--system` | talk to the running instance |
+| `warpipe --discord-sounds on\|off` | let Discord's own sounds (dings) onto the stream, or keep them off (default) |
 | `warpipe --dry-run …` | show what would change |
 | `warpipe --dump FILE` | anonymized `pw-dump` for bug reports (no titles, user or host names) |
 
 Settings live in `~/.config/warpipe/config.json` (selected apps, enforcement on start, language:
-`auto`, `en` or `pl`).
+`auto`, `en` or `pl`, `mute_discord_own_sounds`).
 
 ## Extras: Stream Deck (OpenDeck)
 
@@ -99,6 +104,8 @@ not yet with a real OpenDeck installation or real Stream Deck hardware.
   a fraction of a second, so a very short blip can reach the stream.
 - PID-less apps (e.g. Minecraft) can only join the stream while Discord has at least one capture
   stream open (i.e. some other app with a PID is playing).
+- Discord's own sounds are only kept off while Warpipe runs; without it, new dings reach the stream
+  again (Warpipe cuts links, it never changes PipeWire or Discord settings).
 - Tested on Fedora 45, KDE Plasma 6 (Wayland), PipeWire 1.6, WirePlumber 0.5.
 
 ## Development

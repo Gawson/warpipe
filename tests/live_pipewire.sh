@@ -338,7 +338,8 @@ cat > "$WARPIPE_CONFIG_DIR/config.json" <<'JSON'
   "enforce": false,
   "capture_match_terms": ["dd-test-discord"],
   "capture_names": ["dd-test-discord_capture"],
-  "mic_names": ["dd-test-mic", "recStream", "WEBRTC VoiceEngine"]
+  "mic_names": ["dd-test-mic", "recStream", "WEBRTC VoiceEngine"],
+  "discord_sound_names": ["dd-test-discord-sounds"]
 }
 JSON
 
@@ -575,6 +576,58 @@ check "W5 po wyjściu: capC <- browser (stan Discorda przywrócony)" q wait-inbo
 check "W5 brak naszych połączeń" test "$(q managed)" -eq 0
 check "W5 mikrofon nietknięty" mic_untouched
 
+# ================================================================ N: Discord's own sounds in "Whole system" mode
+echo "--- N: Discord's own sounds (dings) kept off the stream in Whole system mode"
+safe_guard
+python3 "$HERE/bin/warpipe" --watch > "$TMP/watch-n.log" 2>&1 &
+WATCH_PID=$!
+for _ in $(seq 1 50); do pgrep -P "$WATCH_PID" -f "pw-dump -m" >/dev/null && break; sleep 0.1; done
+sleep 0.5
+check "N0 Whole system: capC <- browser, as Discord/WirePlumber made it" q wait-inbound "$C" "dd-test-browser" 3
+q link-lifetime dd-test-discord-sounds dd-test-discord_capture 8 > "$TMP/ding-n.out" 2>&1 &
+LT_PID=$!
+sleep 0.7
+start_app dd-test-discord-sounds 2 "dd-test notification"
+q wait-node dd-test-discord-sounds 1 5 || abort "atrapa dd-test-discord-sounds się nie pojawiła"
+DS=$(q ids dd-test-discord-sounds)
+start_capture capE dd-test-discord_capture "$(q serial "$DS")" "dd-test ding capture"
+wait "$LT_PID"
+DS_MS=$(cat "$TMP/ding-n.out")
+info "N1 Discord sound -> discord_capture existed ${DS_MS} ms"
+[ "$DS_MS" = unseen ] && DS_MS=0
+check "N1 Discord's own sound cut at once in Whole system mode: < 150 ms (measured: ${DS_MS} ms)" \
+    sh -c "test '$DS_MS' != timeout && test '${DS_MS:-9999}' -lt 150"
+E=$(new_id dd-test-discord_capture "$C")
+check "N2 its discord_capture has no links; capC <- browser unchanged" \
+    sh -c "test -n '$E' && python3 '$TMP/q.py' wait-inbound '$E' '' 2 && python3 '$TMP/q.py' wait-inbound '$C' dd-test-browser 2"
+check "N2 no links of ours (only cut, nothing created)" test "$(q managed)" -eq 0
+"${TOOL[@]}" --discord-sounds on > "$TMP/n3.out" 2>&1; rc=$?
+check "N3 --discord-sounds on (running instance): its link comes back" \
+    sh -c "test $rc -eq 0 && python3 '$TMP/q.py' wait-inbound '$E' dd-test-discord-sounds 3"
+"${TOOL[@]}" --discord-sounds off > "$TMP/n4.out" 2>&1; rc=$?
+check "N4 --discord-sounds off: cut again" sh -c "test $rc -eq 0 && python3 '$TMP/q.py' wait-inbound '$E' '' 3"
+"${TOOL[@]}" --status > "$TMP/n4s.out" 2>&1
+check "N4 --status shows the option" grep -q "Discord's own sounds: kept off the stream" "$TMP/n4s.out"
+check "N mikrofon nietknięty" mic_untouched
+kill -TERM "$WATCH_PID"
+WRC=124
+for _ in $(seq 1 50); do
+    if ! kill -0 "$WATCH_PID" 2>/dev/null; then wait "$WATCH_PID"; WRC=$?; break; fi
+    sleep 0.1
+done
+WATCH_PID=""
+check "N5 SIGTERM: --watch exits with 0" test "$WRC" -eq 0
+check "N5 after exit: the Discord sound stays cut, capC <- browser" \
+    sh -c "python3 '$TMP/q.py' wait-inbound '$E' '' 2 && python3 '$TMP/q.py' wait-inbound '$C' dd-test-browser 2"
+"${TOOL[@]}" --discord-sounds on > "$TMP/n6.out" 2>&1; rc=$?
+check "N6 --discord-sounds on without a running instance: brought back from the snapshot" \
+    sh -c "test $rc -eq 0 && python3 '$TMP/q.py' wait-inbound '$E' dd-test-discord-sounds 3"
+"${TOOL[@]}" --discord-sounds off > /dev/null 2>&1
+check "N6 no links of ours" test "$(q managed)" -eq 0
+kill_pid "${PID_OF[capE]}"; unset 'PID_OF[capE]'
+kill_pid "${PID_OF[dd-test-discord-sounds]}"; unset 'PID_OF[dd-test-discord-sounds]'
+q wait-gone "$DS" 5
+
 # ================================================================ K: SIGKILL of the tool
 echo "--- K: SIGKILL narzędzia — jego monitor pw-dump -m nie może zostać (PR_SET_PDEATHSIG)"
 python3 "$HERE/bin/warpipe" --watch > "$TMP/watch-kill.log" 2>&1 &
@@ -638,7 +691,7 @@ check "D1 --dump bez media.name (tytułu)" sh -c "! grep -q PRIVATE '$TMP/dump.j
 rm -f "$TMP/dump.json"
 
 # ================================================================ prywatność
-if grep -rq "PRIVATE" "$TMP/watch.log" "$TMP"/*.out "$WARPIPE_CONFIG_DIR" "$WARPIPE_RUNTIME_DIR" 2>/dev/null; then
+if grep -rq "PRIVATE" "$TMP/watch.log" "$TMP/watch-n.log" "$TMP"/*.out "$WARPIPE_CONFIG_DIR" "$WARPIPE_RUNTIME_DIR" 2>/dev/null; then
     fail "P1 media.name przeciekł do logów/plików"
 else
     pass "P1 media.name (tytuł) nie trafił do logów, konfiguracji ani migawki"
