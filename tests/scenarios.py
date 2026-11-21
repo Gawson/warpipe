@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 from helpers import GraphBuilder
 
-from discord_dzwiek.planner import DetectConfig
+from warpipe.planner import DetectConfig
 
 ALSA_SINK = "alsa_output.usb-Generic_USB_Headset-00.analog-stereo"
 HDMI_SINK = "alsa_output.pci-0000_09_00.1.hdmi-stereo"

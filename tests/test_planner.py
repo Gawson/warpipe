@@ -3,8 +3,8 @@ import unittest
 from helpers import FakePw, GraphBuilder
 from scenarios import CFG_MON, base_system, monitor_mode, per_app, with_apps
 
-from discord_dzwiek.graph import Graph, Port
-from discord_dzwiek.planner import (DetectConfig, channel_pairs, detect,
+from warpipe.graph import Graph, Port
+from warpipe.planner import (DetectConfig, channel_pairs, detect,
                                     link_entry, plan_apply, plan_restore,
                                     snapshot_originals)
 

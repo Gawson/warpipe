@@ -4,8 +4,8 @@ from helpers import GraphBuilder, load_fixture
 from scenarios import (ALSA_SINK, CFG_MON, base_system, monitor_mode, per_app,
                        with_apps)
 
-from discord_dzwiek.graph import Graph
-from discord_dzwiek.planner import (KIND_MIC, KIND_SCREENSHARE, KIND_UNKNOWN,
+from warpipe.graph import Graph
+from warpipe.planner import (KIND_MIC, KIND_SCREENSHARE, KIND_UNKNOWN,
                                     STATUS_AMBIGUOUS, STATUS_FOUND,
                                     STATUS_INVALID, STATUS_NONE, DetectConfig,
                                     app_key, detect, list_apps, plan_apply)
@@ -390,7 +390,7 @@ class TestSampleGoLiveCapture(unittest.TestCase):
         self.assertEqual(det.warnings, [])
 
     def test_firefox_in_stream_playstream_not_an_app(self):
-        from discord_dzwiek.planner import apps_in_stream
+        from warpipe.planner import apps_in_stream
         det = detect(self.graph, CFG)
         apps = list_apps(self.graph, CFG)
         self.assertEqual([a.key for a in apps], ["Firefox"])
@@ -414,8 +414,8 @@ class TestSampleGoLiveCapture(unittest.TestCase):
 
         from helpers import FakePw
 
-        from discord_dzwiek.enforcer import Enforcer
-        from discord_dzwiek.state import Config, SnapshotStore
+        from warpipe.enforcer import Enforcer
+        from warpipe.state import Config, SnapshotStore
         b = GraphBuilder(self.objs)
         before = b.all_link_pairs()
         cap_in_ports = {o["id"] for o in b.objs if o.get("type") == "PipeWire:Interface:Port"

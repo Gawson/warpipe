@@ -16,15 +16,15 @@ from unittest import mock
 from helpers import FakePw, GraphBuilder
 from scenarios import base_system, per_app, with_apps
 
-from discord_dzwiek import cli
-from discord_dzwiek.control import (MAX_LINE, ControlError, ControlHandler,
+from warpipe import cli
+from warpipe.control import (MAX_LINE, ControlError, ControlHandler,
                                     ControlServer, NotRunning, ProtocolError,
                                     parse_request, remove_stale_socket,
                                     request, status_to_dict)
-from discord_dzwiek.enforcer import Enforcer
-from discord_dzwiek.graph import Graph
-from discord_dzwiek.pw import PwError
-from discord_dzwiek.state import Config, SnapshotStore
+from warpipe.enforcer import Enforcer
+from warpipe.graph import Graph
+from warpipe.pw import PwError
+from warpipe.state import Config, SnapshotStore
 
 
 def wait_for(pred, timeout=3.0):

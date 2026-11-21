@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dźwięk z aplikacji</title>
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <div class="row">
+    <label for="app-select">Aplikacja</label>
+    <div class="field">
+      <select id="app-select"><option value="">— chwileczkę… —</option></select>
+      <button id="refresh" type="button" title="Odśwież listę">↻</button>
+    </div>
+  </div>
+  <div class="row">
+    <label for="app-key">albo wpisz nazwę</label>
+    <div class="field">
+      <input id="app-key" type="text" maxlength="200" autocomplete="off" spellcheck="false"
+             placeholder="np. Warframe.x64.exe (gdy teraz nie gra)">
+    </div>
+  </div>
+  <div class="row">
+    <label for="label">Podpis na przycisku</label>
+    <div class="field">
+      <input id="label" type="text" maxlength="60" autocomplete="off" placeholder="(opcjonalnie) np. Warframe">
+    </div>
+  </div>
+  <p id="status" class="hint">Łączę się z wtyczką…</p>
+  <p class="hint">
+    Naciśnięcie przycisku dodaje albo zabiera dźwięk tej aplikacji ze streamu w Discordzie.
+    Zielony przycisk = aplikacja jest teraz na streamie. Szary = aplikacja teraz nie gra.
+  </p>
+  <details>
+    <summary>Zaawansowane</summary>
+    <div class="row">
+      <label for="tool-path">Program warpipe</label>
+      <div class="field">
+        <input id="tool-path" type="text" maxlength="4096" autocomplete="off" spellcheck="false"
+               placeholder="(puste = znajdź sam)">
+      </div>
+    </div>
+    <p class="hint">Pełna ścieżka, np. ~/.local/bin/warpipe. Potrzebne tylko wtedy,
+      gdy wtyczka nie umie sama uruchomić programu.</p>
+  </details>
+  <script src="app.js"></script>
+</body>
+</html>

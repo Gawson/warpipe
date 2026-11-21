@@ -1,0 +1,52 @@
+{
+  "Name": "Warpipe",
+  "Description": "Przyciski do streamu w Discordzie (Go Live): dźwięk wybranej aplikacji do streamu albo cały system. Wymaga programu „Warpipe” (warpipe).",
+  "Author": "warpipe",
+  "Version": "1.0.0",
+  "SDKVersion": 2,
+  "Software": {
+    "MinimumVersion": "6.4"
+  },
+  "Icon": "icons/plugin",
+  "Category": "Discord",
+  "CategoryIcon": "icons/category",
+  "CodePaths": {
+    "x86_64-unknown-linux-gnu": "bin/warpipe-plugin",
+    "aarch64-unknown-linux-gnu": "bin/warpipe-plugin"
+  },
+  "CodePathLin": "bin/warpipe-plugin",
+  "OS": [
+    {
+      "Platform": "linux"
+    }
+  ],
+  "Actions": [
+    {
+      "UUID": "io.github.gawson.warpipe.app",
+      "Name": "Dźwięk z aplikacji",
+      "Icon": "icons/action-app",
+      "Tooltip": "Dodaje albo zabiera dźwięk wybranej aplikacji (np. gry) ze streamu w Discordzie",
+      "Controllers": ["Keypad"],
+      "SupportedInMultiActions": false,
+      "PropertyInspectorPath": "pi/app.html",
+      "States": [
+        {
+          "Image": "icons/key-app"
+        }
+      ]
+    },
+    {
+      "UUID": "io.github.gawson.warpipe.system",
+      "Name": "Cały system",
+      "Icon": "icons/action-system",
+      "Tooltip": "Do streamu w Discordzie idzie cały dźwięk komputera (zwykłe zachowanie Discorda)",
+      "Controllers": ["Keypad"],
+      "SupportedInMultiActions": false,
+      "States": [
+        {
+          "Image": "icons/key-system"
+        }
+      ]
+    }
+  ]
+}

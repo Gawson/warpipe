@@ -1,0 +1,15 @@
+#!/usr/bin/python3 -I
+# Warpipe — wtyczka OpenDeck / Stream Deck (proces wtyczki).
+# -I: bez PYTHONPATH, bez katalogu bieżącego i katalogu skryptu w sys.path
+# (OpenDeck uruchamia wtyczkę w jej katalogu). Własne moduły bierzemy tylko z ../lib.
+import os
+import sys
+
+sys.dont_write_bytecode = True
+_lib = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "lib")
+sys.path.insert(0, _lib)
+
+from warpipe_plugin.main import main  # noqa: E402
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

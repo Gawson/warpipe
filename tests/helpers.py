@@ -17,17 +17,17 @@ SAMPLE_NOAUDIO = os.path.join(FIXTURES, "sample-kde-screenshare-noaudio.json")
 # target.object 1272 = Firefox #221), mikrofon rozmowy recStream #93, playStream #191.
 SAMPLE_GOLIVE = os.path.join(FIXTURES, "sample-kde-golive-capture.json")
 
-# Wtyczka OpenDeck (czyste moduły ddplugin bez pętli zdarzeń Qt)
-import glob as _glob
-_PLUGINS = sorted(_glob.glob(os.path.join(ROOT, "opendeck-plugin", "*.sdPlugin")))
-PLUGIN_DIR = _PLUGINS[0] if _PLUGINS else os.path.join(ROOT, "opendeck-plugin", "missing.sdPlugin")
+# Wtyczka OpenDeck (czyste moduły warpipe_plugin bez pętli zdarzeń Qt). Bez __pycache__
+# w katalogu wtyczki — ten katalog bywa kopiowany wprost do ~/.config/opendeck/plugins.
+sys.dont_write_bytecode = True
+PLUGIN_DIR = os.path.join(ROOT, "opendeck-plugin", "io.github.gawson.warpipe.sdPlugin")
 PLUGIN_LIB = os.path.join(PLUGIN_DIR, "lib")
 if PLUGIN_LIB not in sys.path:
     sys.path.insert(0, PLUGIN_LIB)
 
-from discord_dzwiek.graph import (MANAGED_KEY, RESTORED_KEY, T_CLIENT,  # noqa: E402
+from warpipe.graph import (MANAGED_KEY, RESTORED_KEY, T_CLIENT,  # noqa: E402
                                   T_CORE, T_LINK, T_NODE, T_PORT)
-from discord_dzwiek.pw import PwError  # noqa: E402
+from warpipe.pw import PwError  # noqa: E402
 
 
 def load_fixture(path: str = SAMPLE_NOAUDIO) -> list:

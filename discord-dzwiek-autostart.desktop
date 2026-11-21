@@ -1,9 +1,0 @@
-[Desktop Entry]
-Type=Application
-Name=Dźwięk do Discorda
-Comment=Do streamu w Discordzie trafia tylko dźwięk wybranych aplikacji
-Exec=discord-dzwiek --tray
-Icon=audio-volume-high
-Terminal=false
-X-GNOME-Autostart-enabled=true
-X-KDE-autostart-after=panel

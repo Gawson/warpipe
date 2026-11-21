@@ -8,8 +8,8 @@ from pathlib import Path
 from helpers import FakePw
 from scenarios import per_app
 
-from discord_dzwiek.enforcer import Enforcer
-from discord_dzwiek.state import Config, SnapshotStore
+from warpipe.enforcer import Enforcer
+from warpipe.state import Config, SnapshotStore
 
 
 class Tmp(unittest.TestCase):

@@ -6,8 +6,8 @@ import unittest
 
 from helpers import load_fixture
 
-from discord_dzwiek.enforcer import MonitorParser, Watcher
-from discord_dzwiek.pw import PwError
+from warpipe.enforcer import MonitorParser, Watcher
+from warpipe.pw import PwError
 
 
 def arr(objs):

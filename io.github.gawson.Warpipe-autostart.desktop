@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Warpipe
+Comment=Do streamu w Discordzie trafia tylko dźwięk wybranych aplikacji
+Exec=warpipe --tray
+Icon=audio-volume-high
+Terminal=false
+X-GNOME-Autostart-enabled=true
+X-KDE-autostart-after=panel

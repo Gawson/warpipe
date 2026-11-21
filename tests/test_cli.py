@@ -11,9 +11,9 @@ from helpers import FakePw, GraphBuilder, load_fixture
 from scenarios import (base_system, monitor_mode, per_app, with_apps,
                        write_confirmed_config)
 
-from discord_dzwiek import cli
-from discord_dzwiek.graph import Graph
-from discord_dzwiek.scrub import scrub_dump
+from warpipe import cli
+from warpipe.graph import Graph
+from warpipe.scrub import scrub_dump
 
 
 class TestScrub(unittest.TestCase):
@@ -156,7 +156,7 @@ class TestCli(CliBase):
         self.assertEqual(len(json.loads(text)), len(b.dump()))
 
     def test_lock_blocks_second_instance(self):
-        from discord_dzwiek.state import InstanceLock
+        from warpipe.state import InstanceLock
         lock = InstanceLock()
         self.assertTrue(lock.acquire())
         try:

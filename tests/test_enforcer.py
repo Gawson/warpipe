@@ -9,9 +9,9 @@ from helpers import FakePw, GraphBuilder, load_fixture
 from scenarios import (base_system, monitor_mode, per_app, with_apps,
                        write_confirmed_config)
 
-from discord_dzwiek.enforcer import Enforcer
-from discord_dzwiek.graph import MANAGED_KEY, T_LINK, T_PORT, Graph
-from discord_dzwiek.state import Config, SnapshotStore
+from warpipe.enforcer import Enforcer
+from warpipe.graph import MANAGED_KEY, T_LINK, T_PORT, Graph
+from warpipe.state import Config, SnapshotStore
 
 
 class Clock:
@@ -274,7 +274,7 @@ class TestPrivacy(Base):
                 records.append(record.getMessage())
 
         h = H(level=logging.DEBUG)
-        lg = logging.getLogger("discord_dzwiek")
+        lg = logging.getLogger("warpipe")
         old = lg.level
         lg.addHandler(h)
         lg.setLevel(logging.DEBUG)
@@ -426,7 +426,7 @@ class TestPipeWireRestart(Base):
         snap, e = self.crashed_session()
         b2 = self.restarted_graph(e)
         before = b2.all_link_pairs()
-        enf = self.make(b2, enabled=False, persist=False)   # „discord-dzwiek --restore”
+        enf = self.make(b2, enabled=False, persist=False)   # „warpipe --restore”
         ok, msg = enf.restore()
         self.assertTrue(ok, msg)
         self.assertEqual(self.fake.mutations, [])

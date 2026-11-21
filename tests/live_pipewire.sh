@@ -16,8 +16,8 @@
 
 set -u
 HERE=$(cd "$(dirname "$0")/.." && pwd)
-TOOL=(timeout 25 python3 "$HERE/discord-dzwiek")
-BASE_TMP=${DD_TEST_TMP:-${XDG_RUNTIME_DIR:-/tmp}}
+TOOL=(timeout 25 python3 "$HERE/warpipe")
+BASE_TMP=${WARPIPE_TEST_TMP:-${XDG_RUNTIME_DIR:-/tmp}}
 mkdir -p "$BASE_TMP"
 TMP=$(mktemp -d "$BASE_TMP/dd-live.XXXXXX")
 export DISCORD_DZWIEK_CONFIG_DIR="$TMP/config"
@@ -117,13 +117,13 @@ elif cmd == "wait-inbound": # wait-inbound <node-id> <oczekiwane-źródła ("" =
         time.sleep(0.1)
 elif cmd == "managed":      # liczba naszych (oznaczonych) połączeń w całym grafie
     _, _, _, links = graph()
-    print(sum(1 for l in links if "discord-dzwiek.managed" in (l["info"].get("props") or {})))
+    print(sum(1 for l in links if "warpipe.managed" in (l["info"].get("props") or {})))
 elif cmd == "leftovers":    # obiekty testu, które zostały
     d, nodes, _, links = graph()
     bad = [f'node#{i}:{n["info"]["props"].get("node.name")}' for i, n in nodes.items()
            if "dd-test" in json.dumps(n["info"]["props"])]
-    bad += [f'link#{l["id"]}' for l in links if "discord-dzwiek.managed" in (l["info"].get("props") or {})
-            or "discord-dzwiek.restored" in (l["info"].get("props") or {})]
+    bad += [f'link#{l["id"]}' for l in links if "warpipe.managed" in (l["info"].get("props") or {})
+            or "warpipe.restored" in (l["info"].get("props") or {})]
     print(" ".join(bad))
 elif cmd == "foreign":      # połączenia niezwiązane z testem (porty po serialach)
     _, nodes, ports, links = graph()
@@ -143,7 +143,7 @@ elif cmd == "group-safe":   # group-safe <plik --list --json>: wszystkie wykryte
     sys.exit(0 if ok else 1)
 elif cmd == "restored":     # liczba odtworzonych przez narzędzie oryginałów (znacznik restored)
     _, _, _, links = graph()
-    print(sum(1 for l in links if "discord-dzwiek.restored" in (l["info"].get("props") or {})))
+    print(sum(1 for l in links if "warpipe.restored" in (l["info"].get("props") or {})))
 elif cmd == "instance":     # tożsamość uruchomienia PipeWire (jak Graph.instance_id)
     d = dump()
     core = next(o for o in d if o.get("type") == "PipeWire:Interface:Core" and o.get("id") == 0)
@@ -271,7 +271,7 @@ safe_guard() {
 }
 jq_py() { python3 -c "import json,sys; d=json.load(open('$TMP/list.json')); $1"; }
 
-echo "=== Dźwięk do Discorda — test na żywo ($(date -Is))"
+echo "=== Warpipe — test na żywo ($(date -Is))"
 command -v pw-cat >/dev/null && command -v pw-link >/dev/null && command -v pactl >/dev/null || abort "brak pw-cat/pw-link/pactl"
 [ -z "$(q leftovers)" ] || abort "w grafie są już obiekty dd-test (poprzedni test?): $(q leftovers)"
 
@@ -458,7 +458,7 @@ kill_pid "${PID_OF[capB2]}"; unset 'PID_OF[capB2]'; q wait-gone "$B2" 5
 # ================================================================ W: --watch
 echo "--- W: pilnowanie (--watch)"
 safe_guard
-python3 "$HERE/discord-dzwiek" --watch --apply dd-test-game > "$TMP/watch.log" 2>&1 &
+python3 "$HERE/warpipe" --watch --apply dd-test-game > "$TMP/watch.log" 2>&1 &
 WATCH_PID=$!
 check "W1 --watch: capB <- tylko game w ciągu 3 s" q wait-inbound "$B" "dd-test-game" 3
 link_monitor_to "$SINK_ID" "$B"   # „Discord” podłącza monitor ponownie

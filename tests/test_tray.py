@@ -16,8 +16,8 @@ except Exception:  # pragma: no cover
 from helpers import FakePw, GraphBuilder
 from scenarios import base_system, monitor_mode, per_app, with_apps
 
-from discord_dzwiek.enforcer import Enforcer
-from discord_dzwiek.state import Config, SnapshotStore
+from warpipe.enforcer import Enforcer
+from warpipe.state import Config, SnapshotStore
 
 
 @unittest.skipUnless(HAVE_QT, "brak PySide6")
@@ -40,7 +40,7 @@ class TestTrayMenu(unittest.TestCase):
         return [a.text() for a in menu.actions() if not a.isSeparator()]
 
     def test_menu_contents_and_toggle(self):
-        from discord_dzwiek.tray import TrayController
+        from warpipe.tray import TrayController
         self.enf.refresh()
         ctl = TrayController(self.enf)
         texts = self.texts(ctl.menu)
@@ -66,7 +66,7 @@ class TestTrayMenu(unittest.TestCase):
         self.assertFalse(ctl.act_enforce.isChecked())
 
     def test_about_to_show_rebuilds(self):
-        from discord_dzwiek.tray import TrayController
+        from warpipe.tray import TrayController
         ctl = TrayController(self.enf)
         newapp = self.b.app("Spotify", "spotify")
         ctl.menu.aboutToShow.emit()
@@ -74,7 +74,7 @@ class TestTrayMenu(unittest.TestCase):
         self.assertIn("Spotify", ctl.app_actions)
 
     def test_ambiguous_submenu(self):
-        from discord_dzwiek.tray import TrayController
+        from warpipe.tray import TrayController
         b = GraphBuilder()
         ns = with_apps(b, base_system(b))
         c1 = b.capture(node_name="Discord", app_name="Discord", media_name="RecordStream")
@@ -90,10 +90,42 @@ class TestTrayMenu(unittest.TestCase):
         self.assertEqual(sub_texts[0], "Automatycznie")
         self.assertEqual(len(sub_texts), 3)
 
+    def test_control_channel_updates_menu_from_other_thread(self):
+        """Kanał sterowania działa w wątkach stdlib; menu (Qt) zmienia się tylko w wątku GUI
+        przez kolejkowany sygnał — tak jak przy stanie z wątku pilnowania."""
+        import time
+
+        from warpipe.control import request, start_control_server
+        from warpipe.tray import TrayController
+        self.enf.refresh()
+        ctl = TrayController(self.enf)
+        path = Path(self.tmp.name) / "run" / "control.sock"
+        srv = start_control_server(self.enf, path)
+        self.assertIsNotNone(srv)
+        try:
+            r = request({"cmd": "toggle", "app": "Firefox"}, path)
+            self.assertTrue(r["ok"], r)
+            self.assertFalse(ctl.app_actions["Firefox"].isChecked())   # jeszcze nie w wątku GUI
+            end = time.monotonic() + 3
+            while not ctl.app_actions["Firefox"].isChecked() and time.monotonic() < end:
+                self.app.processEvents()
+                time.sleep(0.01)
+            self.assertTrue(ctl.app_actions["Firefox"].isChecked())
+            self.assertTrue(ctl.act_enforce.isChecked())
+            r = request({"cmd": "system"}, path)
+            end = time.monotonic() + 3
+            while ctl.act_enforce.isChecked() and time.monotonic() < end:
+                self.app.processEvents()
+                time.sleep(0.01)
+            self.assertFalse(ctl.act_enforce.isChecked())
+        finally:
+            srv.stop()
+        self.assertFalse(path.exists())
+
     def test_monitor_only_capture_confirmed_from_menu(self):
         """Jedyny strumień „z monitora”: menu prosi o potwierdzenie; wybór zostaje zapamiętany."""
         import json
-        from discord_dzwiek.tray import TrayController
+        from warpipe.tray import TrayController
         b, ns = monitor_mode("ee_sink")
         cfg_path = Path(self.tmp.name) / "c3.json"
         enf = Enforcer(FakePw(b), Config(cfg_path), SnapshotStore(Path(self.tmp.name) / "s3.json"),
