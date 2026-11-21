@@ -167,7 +167,7 @@ class TestSettings(unittest.TestCase):
         self.assertFalse(L.apps_for_pi(None, False, WF)["toolRunning"])
 
     def test_socket_path(self):
-        self.assertEqual(L.control_socket_path({"DISCORD_DZWIEK_RUNTIME_DIR": "/x/y"}), "/x/y/control.sock")
+        self.assertEqual(L.control_socket_path({"WARPIPE_RUNTIME_DIR": "/x/y"}), "/x/y/control.sock")
         with tempfile.TemporaryDirectory() as d:
             self.assertEqual(L.control_socket_path({"XDG_RUNTIME_DIR": d}),
                              os.path.join(d, "warpipe", "control.sock"))
@@ -187,7 +187,7 @@ class TestLanguage(unittest.TestCase):
 
     def test_resolve_locale(self):
         with tempfile.TemporaryDirectory() as d:
-            base = {"DISCORD_DZWIEK_CONFIG_DIR": d}
+            base = {"WARPIPE_CONFIG_DIR": d}
             self.assertEqual(L.resolve_language(dict(base, LANG="pl_PL.UTF-8")), "pl")
             self.assertEqual(L.resolve_language(dict(base, LC_ALL="en_GB.UTF-8", LANG="pl_PL.UTF-8")), "en")
             self.assertEqual(L.resolve_language(dict(base, LC_MESSAGES="pl_PL", LANG="en_US")), "pl")
@@ -197,7 +197,7 @@ class TestLanguage(unittest.TestCase):
 
     def test_resolve_from_tool_config(self):
         with tempfile.TemporaryDirectory() as d:
-            env = {"DISCORD_DZWIEK_CONFIG_DIR": d, "LANG": "en_US.UTF-8"}
+            env = {"WARPIPE_CONFIG_DIR": d, "LANG": "en_US.UTF-8"}
             cfg = Path(d) / "config.json"
             self.assertEqual(L.config_path(env), str(cfg))
             cfg.write_text('{"language": "pl"}')

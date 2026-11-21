@@ -13,7 +13,7 @@ Modules:
   tray     — system tray icon (PySide6)
 """
 
-__version__ = "1.1.0"
+__version__ = "0.1.0"
 APP_NAME = "Warpipe"
 APP_ID = "warpipe"
 DESKTOP_ID = "io.github.gawson.Warpipe"  # .desktop file / icon theme name

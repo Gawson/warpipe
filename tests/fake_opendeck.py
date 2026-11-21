@@ -537,7 +537,7 @@ def make_status(enforce=False, capture="active", apps=(), error=None) -> dict:
 
 def plugin_env(runtime_dir: str, extra: dict | None = None) -> dict:
     env = {k: v for k, v in os.environ.items() if k not in ("QT_QPA_PLATFORM",)}
-    env["DISCORD_DZWIEK_RUNTIME_DIR"] = runtime_dir
+    env["WARPIPE_RUNTIME_DIR"] = runtime_dir
     env["QT_QPA_PLATFORM"] = "offscreen"
     if extra:
         env.update(extra)

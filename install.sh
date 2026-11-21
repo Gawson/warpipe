@@ -61,7 +61,9 @@ desktop() {
 Type=Application
 Name=Warpipe
 GenericName=Stream audio picker
+GenericName[pl]=Wybór dźwięku do streamu
 Comment=Choose which apps are heard in your Discord Go Live stream
+Comment[pl]=Wybierz, które aplikacje słychać w streamie Discord Go Live
 Exec=$BINDIR/warpipe --tray
 Icon=$APP_ID
 Terminal=false

@@ -125,7 +125,7 @@ def normalize_language(value) -> str | None:
 def config_path(env=None) -> str:
     """The tool's config file (same as warpipe.state.config_dir() / "config.json")."""
     env = os.environ if env is None else env
-    d = env.get("DISCORD_DZWIEK_CONFIG_DIR")
+    d = env.get("WARPIPE_CONFIG_DIR")
     if not d:
         base = env.get("XDG_CONFIG_HOME") or os.path.join(
             env.get("HOME") or os.path.expanduser("~"), ".config")
@@ -179,7 +179,7 @@ def tr(msgid: str) -> str:
 def runtime_dir(env=None) -> str:
     """Same as warpipe.state.runtime_dir()."""
     env = os.environ if env is None else env
-    d = env.get("DISCORD_DZWIEK_RUNTIME_DIR")
+    d = env.get("WARPIPE_RUNTIME_DIR")
     if d:
         return d
     base = env.get("XDG_RUNTIME_DIR")

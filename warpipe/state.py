@@ -1,7 +1,7 @@
 """Config, link snapshot and the single-instance lock.
 
-Config: ~/.config/warpipe/config.json (or $DISCORD_DZWIEK_CONFIG_DIR).
-Snapshot and lock: $XDG_RUNTIME_DIR/warpipe/ (or $DISCORD_DZWIEK_RUNTIME_DIR).
+Config: ~/.config/warpipe/config.json (or $WARPIPE_CONFIG_DIR).
+Snapshot and lock: $XDG_RUNTIME_DIR/warpipe/ (or $WARPIPE_RUNTIME_DIR).
 The snapshot lives in the runtime directory (tmpfs) because it describes the
 current PipeWire graph — it is meaningless after logging out anyway.
 
@@ -26,7 +26,7 @@ CONFIG_VERSION = 1
 
 
 def config_dir() -> Path:
-    env = os.environ.get("DISCORD_DZWIEK_CONFIG_DIR")
+    env = os.environ.get("WARPIPE_CONFIG_DIR")
     if env:
         return Path(env)
     base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
@@ -34,7 +34,7 @@ def config_dir() -> Path:
 
 
 def runtime_dir() -> Path:
-    env = os.environ.get("DISCORD_DZWIEK_RUNTIME_DIR")
+    env = os.environ.get("WARPIPE_RUNTIME_DIR")
     if env:
         return Path(env)
     base = os.environ.get("XDG_RUNTIME_DIR")

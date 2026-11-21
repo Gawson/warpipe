@@ -29,8 +29,8 @@ from fake_opendeck import (ACTION_APP, ACTION_SYSTEM, FakeOpenDeck,  # noqa: E40
 
 TMP = sys.argv[1]
 TOOL = [sys.executable, os.path.join(ROOT, "bin", "warpipe")]
-CONFIG_DIR = os.environ["DISCORD_DZWIEK_CONFIG_DIR"]
-RUN_DIR = os.environ["DISCORD_DZWIEK_RUNTIME_DIR"]
+CONFIG_DIR = os.environ["WARPIPE_CONFIG_DIR"]
+RUN_DIR = os.environ["WARPIPE_RUNTIME_DIR"]
 assert CONFIG_DIR.startswith(TMP) and RUN_DIR.startswith(TMP), "the tool directories must be test directories"
 SOCK = os.path.join(RUN_DIR, "control.sock")
 SINK = "ddp-test-sink"

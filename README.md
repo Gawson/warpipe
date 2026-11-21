@@ -38,7 +38,7 @@ each app's output to it. Warpipe rewires exactly those links:
 Click the green pipe in the system tray, tick the apps that should be heard on stream, and turn on
 **Only selected apps**. **Whole system** gives you Discord's normal behaviour back.
 
-<!-- screenshot of the tray menu: docs/assets/tray-menu.png (added with the English UI) -->
+<p align="center"><img src="docs/assets/tray-menu.png" width="300" alt="Warpipe tray menu: Discord Go Live audio active, only Warframe goes to Discord, Firefox and Minecraft (java) stay private"></p>
 
 A popup window with live per-app status is planned for v0.2:
 

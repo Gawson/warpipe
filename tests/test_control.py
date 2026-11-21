@@ -462,8 +462,8 @@ class TestCliRemote(SockBase):
     def setUp(self):
         super().setUp()
         self.env = mock.patch.dict(os.environ, {
-            "DISCORD_DZWIEK_CONFIG_DIR": str(self.dir / "cfg"),
-            "DISCORD_DZWIEK_RUNTIME_DIR": str(self.run_dir),
+            "WARPIPE_CONFIG_DIR": str(self.dir / "cfg"),
+            "WARPIPE_RUNTIME_DIR": str(self.run_dir),
         })
         self.env.start()
 
@@ -525,8 +525,8 @@ class TestWatchModeControl(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         d = Path(tmp.name)
-        env = mock.patch.dict(os.environ, {"DISCORD_DZWIEK_CONFIG_DIR": str(d / "cfg"),
-                                           "DISCORD_DZWIEK_RUNTIME_DIR": str(d / "run")})
+        env = mock.patch.dict(os.environ, {"WARPIPE_CONFIG_DIR": str(d / "cfg"),
+                                           "WARPIPE_RUNTIME_DIR": str(d / "run")})
         env.start()
         self.addCleanup(env.stop)
         b, ns = _per_app()

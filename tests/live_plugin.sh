@@ -16,10 +16,10 @@ HERE=$(cd "$(dirname "$0")/.." && pwd)
 BASE_TMP=${WARPIPE_TEST_TMP:-${XDG_RUNTIME_DIR:-/tmp}}
 mkdir -p "$BASE_TMP"
 TMP=$(mktemp -d "$BASE_TMP/ddp-live.XXXXXX")
-export DISCORD_DZWIEK_CONFIG_DIR="$TMP/config"
-export DISCORD_DZWIEK_RUNTIME_DIR="$TMP/run"
+export WARPIPE_CONFIG_DIR="$TMP/config"
+export WARPIPE_RUNTIME_DIR="$TMP/run"
 export WARPIPE_LANG=en   # the checks below expect English texts (tool and plugin)
-mkdir -p "$DISCORD_DZWIEK_CONFIG_DIR" "$DISCORD_DZWIEK_RUNTIME_DIR"
+mkdir -p "$WARPIPE_CONFIG_DIR" "$WARPIPE_RUNTIME_DIR"
 SINK=ddp-test-sink
 WP_STATE_DIR="$HOME/.local/state/wireplumber"
 PASSES=0
@@ -109,7 +109,7 @@ cleanup() {
     fi
     if [ -z "$alive" ]; then pass "sprzątanie: żadne narzędzie z testu nie działa (--watch, uruchomione przez wtyczkę)"
     else fail "sprzątanie: działa jeszcze narzędzie:$alive"; fi
-    if [ -e "$DISCORD_DZWIEK_RUNTIME_DIR/control.sock" ]; then fail "sprzątanie: zostało gniazdo sterowania"
+    if [ -e "$WARPIPE_RUNTIME_DIR/control.sock" ]; then fail "sprzątanie: zostało gniazdo sterowania"
     else pass "sprzątanie: gniazdo sterowania usunięte"; fi
     if [ -f "$TMP/wp-state.sha256" ]; then
         if (cd / && sha256sum --quiet -c "$TMP/wp-state.sha256" >/dev/null 2>&1); then

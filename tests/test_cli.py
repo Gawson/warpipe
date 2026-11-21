@@ -55,8 +55,8 @@ class CliBase(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         d = Path(self.tmp.name)
         self.env = mock.patch.dict(os.environ, {
-            "DISCORD_DZWIEK_CONFIG_DIR": str(d / "cfg"),
-            "DISCORD_DZWIEK_RUNTIME_DIR": str(d / "run"),
+            "WARPIPE_CONFIG_DIR": str(d / "cfg"),
+            "WARPIPE_RUNTIME_DIR": str(d / "run"),
         })
         self.env.start()
         self.dir = d

@@ -90,7 +90,7 @@ class TestDetectLanguage(LanguageCase):
     def test_config_file_is_used_lazily(self):
         with tempfile.TemporaryDirectory() as d:
             (Path(d) / "config.json").write_text(json.dumps({"language": "pl"}), encoding="utf-8")
-            env = {"DISCORD_DZWIEK_CONFIG_DIR": d, "LANG": "en_US.UTF-8"}
+            env = {"WARPIPE_CONFIG_DIR": d, "LANG": "en_US.UTF-8"}
             with mock.patch.dict(os.environ, env):
                 os.environ.pop("WARPIPE_LANG", None)
                 i18n.set_language(None)
@@ -172,8 +172,8 @@ class TestCliLanguages(LanguageCase):
         fake = FakePw(b)
         out, err = io.StringIO(), io.StringIO()
         with tempfile.TemporaryDirectory() as d, \
-                mock.patch.dict(os.environ, {"DISCORD_DZWIEK_CONFIG_DIR": d + "/cfg",
-                                             "DISCORD_DZWIEK_RUNTIME_DIR": d + "/run"}), \
+                mock.patch.dict(os.environ, {"WARPIPE_CONFIG_DIR": d + "/cfg",
+                                             "WARPIPE_RUNTIME_DIR": d + "/run"}), \
                 mock.patch.object(cli, "PwCli", lambda: fake), \
                 mock.patch.object(cli, "setup_logging", lambda *a, **k: None), \
                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):

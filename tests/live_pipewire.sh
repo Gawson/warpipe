@@ -21,10 +21,10 @@ TOOL=(timeout 25 python3 "$HERE/bin/warpipe")
 BASE_TMP=${WARPIPE_TEST_TMP:-${XDG_RUNTIME_DIR:-/tmp}}
 mkdir -p "$BASE_TMP"
 TMP=$(mktemp -d "$BASE_TMP/dd-live.XXXXXX")
-export DISCORD_DZWIEK_CONFIG_DIR="$TMP/config"
-export DISCORD_DZWIEK_RUNTIME_DIR="$TMP/run"
+export WARPIPE_CONFIG_DIR="$TMP/config"
+export WARPIPE_RUNTIME_DIR="$TMP/run"
 export WARPIPE_LANG=en   # the checks below grep English output
-mkdir -p "$DISCORD_DZWIEK_CONFIG_DIR" "$DISCORD_DZWIEK_RUNTIME_DIR"
+mkdir -p "$WARPIPE_CONFIG_DIR" "$WARPIPE_RUNTIME_DIR"
 
 SINK=dd-test-sink
 MOD=""
@@ -282,7 +282,7 @@ DEF_SINK=$(pactl get-default-sink)
 DEF_SOURCE=$(pactl get-default-source)
 q foreign > "$TMP/foreign-before.txt"
 
-cat > "$DISCORD_DZWIEK_CONFIG_DIR/config.json" <<'JSON'
+cat > "$WARPIPE_CONFIG_DIR/config.json" <<'JSON'
 {
   "version": 1,
   "selected_apps": [],
@@ -429,7 +429,7 @@ check "B1 --apply bez potwierdzenia: kod 3, bez zmian" test $rc -eq 3 -a "$(q in
 "${TOOL[@]}" --apply dd-test-browser --capture "$B" > "$TMP/b.out" 2>&1; rc=$?
 check "B2 --apply dd-test-browser --capture B: kod 0" test $rc -eq 0
 check "B2 potwierdzenie zapamiętane w konfiguracji" \
-    python3 -c "import json,sys; c=json.load(open('$DISCORD_DZWIEK_CONFIG_DIR/config.json')); sys.exit(0 if {'program':'Discord','node':'dd-test-discord-generic','sink':'$SINK'} in c.get('confirmed_captures',[]) else 1)"
+    python3 -c "import json,sys; c=json.load(open('$WARPIPE_CONFIG_DIR/config.json')); sys.exit(0 if {'program':'Discord','node':'dd-test-discord-generic','sink':'$SINK'} in c.get('confirmed_captures',[]) else 1)"
 check "B2 capB <- tylko browser" \
     test "$(q inbound "$B")" = "dd-test-browser#$BROWSER:output_FL>input_FL dd-test-browser#$BROWSER:output_FR>input_FR"
 check "B2 mikrofon nietknięty" mic_untouched
@@ -508,7 +508,7 @@ pw-cat --record --raw --format s16 --rate 48000 --channels 2 --target 0 \
 PID_OF[stale]=$!
 q wait-node dd-test-stale 1 5 || abort "dd-test-stale się nie pojawił"
 STALE=$(q ids dd-test-stale)
-SNAP="$DISCORD_DZWIEK_RUNTIME_DIR/snapshot.json"
+SNAP="$WARPIPE_RUNTIME_DIR/snapshot.json"
 INST=$(q instance)
 check "S0 dd-test-stale bez połączeń" test -z "$(q inbound "$STALE")"
 q write-snapshot "$SNAP" "0:0" "$STALE" "$BROWSER" output_FL input_FL
@@ -535,7 +535,7 @@ check "D1 --dump bez media.name (tytułu)" sh -c "! grep -q PRIVATE '$TMP/dump.j
 rm -f "$TMP/dump.json"
 
 # ================================================================ prywatność
-if grep -rq "PRIVATE" "$TMP/watch.log" "$TMP"/*.out "$DISCORD_DZWIEK_CONFIG_DIR" "$DISCORD_DZWIEK_RUNTIME_DIR" 2>/dev/null; then
+if grep -rq "PRIVATE" "$TMP/watch.log" "$TMP"/*.out "$WARPIPE_CONFIG_DIR" "$WARPIPE_RUNTIME_DIR" 2>/dev/null; then
     fail "P1 media.name przeciekł do logów/plików"
 else
     pass "P1 media.name (tytuł) nie trafił do logów, konfiguracji ani migawki"
